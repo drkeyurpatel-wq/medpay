@@ -1774,7 +1774,10 @@ async function settlementsPage(env, searchParams) {
   for (const s of settlements) {
     const hasPmt = !!s.payment_utr;
     const pmtBadge = hasPmt ? `<span class="badge badge-active">Paid</span>` : (s.locked ? `<span class="badge" style="background:#fefcbf;color:#975a16">Awaiting Payment</span>` : '');
-    pmtDataMap[s.id] = { utr: s.payment_utr||'', date: s.payment_date||'', bank: s.payment_bank||'', mode: s.payment_mode||'NEFT', amount: s.payment_amount||s.final_payout };
+    const grossP = s.final_payout || 0;
+    const tdsAmt = s.tds_amount || (grossP * 0.1);
+    const netP = s.net_payout || (grossP - tdsAmt);
+    pmtDataMap[s.id] = { utr: s.payment_utr||'', date: s.payment_date||'', bank: s.payment_bank||'', mode: s.payment_mode||'NEFT', amount: s.payment_amount || netP, gross: grossP, tdsAmt: tdsAmt };
     rows += `<tr>
       <td>${s.month}</td>
       <td>${s.centre}</td>
@@ -1829,11 +1832,12 @@ async function settlementsPage(env, searchParams) {
     <div id="paymentModal" class="hidden" style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:200;display:flex;align-items:center;justify-content:center">
       <div class="card" style="max-width:500px;width:95%">
         <div class="card-header"><div class="card-title">Record Payment</div><button class="btn btn-outline btn-sm" onclick="closePaymentModal()">Close</button></div>
+        <div id="pmt_tds_info" style="background:#f7fafc;border-radius:8px;padding:12px;margin-bottom:16px;font-size:13px"></div>
         <input type="hidden" id="pmt_settlement_id">
         <div class="form-group"><label>UTR / Reference No. *</label><input type="text" id="pmt_utr" placeholder="e.g. AXISN12345678"></div>
         <div class="form-row">
           <div class="form-group"><label>Payment Date *</label><input type="date" id="pmt_date"></div>
-          <div class="form-group"><label>Amount (Rs.) *</label><input type="number" id="pmt_amount" step="0.01"></div>
+          <div class="form-group"><label>Net Amount to Pay (Rs.) *</label><input type="number" id="pmt_amount" step="0.01"></div>
         </div>
         <div class="form-row">
           <div class="form-group"><label>Bank</label><input type="text" id="pmt_bank" placeholder="e.g. HDFC Bank"></div>
@@ -1918,6 +1922,13 @@ function showPaymentModal(id) {
   document.getElementById('pmt_bank').value = data.bank || '';
   document.getElementById('pmt_mode').value = data.mode || 'NEFT';
   document.getElementById('pmt_amount').value = data.amount || '';
+
+  // TDS info
+  var gross = data.gross || 0;
+  var tds = data.tdsAmt || 0;
+  var net = gross - tds;
+  document.getElementById('pmt_tds_info').innerHTML = '<strong>Gross Payout:</strong> Rs. ' + Math.round(gross).toLocaleString('en-IN') + ' &nbsp;|&nbsp; <strong style="color:#c53030">TDS:</strong> - Rs. ' + Math.round(tds).toLocaleString('en-IN') + ' &nbsp;|&nbsp; <strong style="color:#276749">Net Payable:</strong> Rs. ' + Math.round(net).toLocaleString('en-IN');
+
   var modal = document.getElementById('paymentModal');
   modal.classList.remove('hidden');
   modal.style.display = 'flex';
@@ -2425,7 +2436,7 @@ async function statementPage(env, settlementId) {
           <tr><td>Bank</td><td>${settlement.payment_bank || '—'}</td></tr>
           <tr><td>Gross Amount</td><td>${fmtRs(payout)}</td></tr>
           <tr><td>TDS Deducted (${tdsRate}%)</td><td style="color:#c53030">- ${fmtRs(tdsAmt)}</td></tr>
-          <tr><td style="font-weight:700">Net Amount Paid</td><td style="font-weight:700;font-size:16px;color:#276749">${fmtRs(settlement.payment_amount || netPayout)}</td></tr>
+          <tr><td style="font-weight:700">Net Amount Paid</td><td style="font-weight:700;font-size:16px;color:#276749">${fmtRs(netPayout)}</td></tr>
         </table>
       </div>` : ''}
 
