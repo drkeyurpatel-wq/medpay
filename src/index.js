@@ -693,25 +693,28 @@ async function calcPage(env) {
             <label>Month</label>
             <input type="month" id="calc_month" value="${new Date().toISOString().slice(0,7)}">
           </div>
-          <div class="form-group">
-            <label>Centre</label>
-            <select id="calc_centre">
-              <option value="Shilaj">Shilaj</option>
-              <option value="Vastral">Vastral</option>
-              <option value="Modasa">Modasa</option>
-              <option value="Gandhinagar">Gandhinagar</option>
-              <option value="Udaipur">Udaipur</option>
-            </select>
-          </div>
         </div>
         <div class="upload-zone" id="dropZone" onclick="document.getElementById('csvFile').click()">
-          <input type="file" id="csvFile" accept=".csv" style="display:none" onchange="handleFile(this.files[0])">
+          <input type="file" id="csvFile" accept=".csv" style="display:none" multiple onchange="handleFiles(this.files)">
           <div style="font-size:36px;margin-bottom:8px">📄</div>
-          <div style="font-size:16px;font-weight:600;color:#2d3748">Drop eCW CSV here or click to browse</div>
-          <div style="font-size:13px;color:#a0aec0;margin-top:4px">Supports standard eCW export format</div>
+          <div style="font-size:16px;font-weight:600;color:#2d3748">Drop eCW CSV(s) here or click to browse</div>
+          <div style="font-size:13px;color:#a0aec0;margin-top:4px">Upload multiple files — across centres or date ranges. They will be combined.</div>
         </div>
-        <div id="fileInfo" class="hidden" style="margin-top:12px;padding:12px;background:#f7fafc;border-radius:8px"></div>
-        <div style="margin-top:16px;text-align:right">
+        <div id="fileList" class="hidden" style="margin-top:12px"></div>
+        <div id="doctorFilter" class="hidden" style="margin-top:16px">
+          <div class="form-section">
+            <div class="form-section-title" style="display:flex;justify-content:space-between;align-items:center">
+              <span>Select Doctors to Calculate</span>
+              <div class="btn-group">
+                <button class="btn btn-outline btn-sm" onclick="toggleAllDoctors(true)">Select All</button>
+                <button class="btn btn-outline btn-sm" onclick="toggleAllDoctors(false)">Deselect All</button>
+              </div>
+            </div>
+            <div id="doctorCheckboxes" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px"></div>
+          </div>
+        </div>
+        <div style="margin-top:16px;display:flex;justify-content:space-between;align-items:center">
+          <button class="btn btn-outline" id="clearBtn" onclick="clearAllFiles()" style="display:none">Clear All Files</button>
           <button class="btn btn-primary" id="processBtn" onclick="processCSV()" disabled>Process Bills</button>
         </div>
       </div>
@@ -778,10 +781,12 @@ async function calcPage(env) {
 var DOC_DATA = ${docJson};
 
 // ============ GLOBALS ============
-var csvRows = null;
+var uploadedFiles = [];  // { name, centre, rows[] }
+var allCsvRows = [];     // combined rows from all files
 var calcResults = null;
 var manualBillRows = [];
 var allFlags = [];
+var detectedDoctors = {}; // docId -> { name, billCount }
 
 // ============ UI HELPERS ============
 function switchTab(t) {
@@ -828,26 +833,134 @@ function fmtDate(d) {
   return dt.getDate().toString().padStart(2, '0') + '-' + months[dt.getMonth()] + '-' + dt.getFullYear();
 }
 
-// ============ DRAG & DROP ============
+// ============ DRAG & DROP (MULTI-FILE) ============
 var dz = document.getElementById('dropZone');
 if (dz) {
   dz.addEventListener('dragover', function(e) { e.preventDefault(); dz.classList.add('dragover'); });
   dz.addEventListener('dragleave', function() { dz.classList.remove('dragover'); });
-  dz.addEventListener('drop', function(e) { e.preventDefault(); dz.classList.remove('dragover'); if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]); });
+  dz.addEventListener('drop', function(e) { e.preventDefault(); dz.classList.remove('dragover'); if (e.dataTransfer.files.length) handleFiles(e.dataTransfer.files); });
 }
 
-function handleFile(file) {
-  if (!file) return;
-  var reader = new FileReader();
-  reader.onload = function(e) {
-    var text = e.target.result;
-    csvRows = parseCSV(text);
-    var info = document.getElementById('fileInfo');
-    info.classList.remove('hidden');
-    info.innerHTML = '<strong>' + file.name + '</strong> — ' + csvRows.length + ' data rows parsed';
-    document.getElementById('processBtn').disabled = false;
-  };
-  reader.readAsText(file);
+function handleFiles(files) {
+  if (!files || files.length === 0) return;
+  var pending = files.length;
+  for (var i = 0; i < files.length; i++) {
+    (function(file) {
+      var reader = new FileReader();
+      reader.onload = function(e) {
+        var text = e.target.result;
+        var rows = parseCSV(text);
+        // Detect centre from file header (first few lines)
+        var centre = detectCentre(text);
+        uploadedFiles.push({ name: file.name, centre: centre, rows: rows });
+        pending--;
+        if (pending === 0) onAllFilesLoaded();
+      };
+      reader.readAsText(file);
+    })(files[i]);
+  }
+}
+
+function detectCentre(text) {
+  var header = text.substring(0, 500).toUpperCase();
+  if (header.indexOf('SHILAJ') >= 0 || header.indexOf('NEURO 1') >= 0) return 'Shilaj';
+  if (header.indexOf('VASTRAL') >= 0) return 'Vastral';
+  if (header.indexOf('MODASA') >= 0) return 'Modasa';
+  if (header.indexOf('GANDHINAGAR') >= 0) return 'Gandhinagar';
+  if (header.indexOf('UDAIPUR') >= 0) return 'Udaipur';
+  return 'Unknown';
+}
+
+function onAllFilesLoaded() {
+  // Combine all rows
+  allCsvRows = [];
+  uploadedFiles.forEach(function(f) {
+    f.rows.forEach(function(r) {
+      r._centre = f.centre; // tag each row with its source centre
+      allCsvRows.push(r);
+    });
+  });
+
+  // Show file list
+  var fl = document.getElementById('fileList');
+  fl.classList.remove('hidden');
+  fl.innerHTML = '<h3 style="margin-bottom:8px">Uploaded Files (' + uploadedFiles.length + ')</h3>' +
+    uploadedFiles.map(function(f, i) {
+      return '<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;background:#f7fafc;border-radius:6px;margin-bottom:4px">' +
+        '<span><strong>' + f.name + '</strong> — ' + f.rows.length + ' rows — <span class="badge badge-mgm">' + f.centre + '</span></span>' +
+        '<button class="btn btn-danger btn-sm" onclick="removeFile(' + i + ')">\\u2715</button></div>';
+    }).join('');
+
+  document.getElementById('clearBtn').style.display = '';
+
+  // Build doctor filter from parsed data
+  buildDoctorFilter();
+
+  document.getElementById('processBtn').disabled = false;
+}
+
+function removeFile(idx) {
+  uploadedFiles.splice(idx, 1);
+  if (uploadedFiles.length === 0) {
+    clearAllFiles();
+  } else {
+    onAllFilesLoaded();
+  }
+}
+
+function clearAllFiles() {
+  uploadedFiles = [];
+  allCsvRows = [];
+  detectedDoctors = {};
+  document.getElementById('fileList').classList.add('hidden');
+  document.getElementById('fileList').innerHTML = '';
+  document.getElementById('doctorFilter').classList.add('hidden');
+  document.getElementById('doctorCheckboxes').innerHTML = '';
+  document.getElementById('processBtn').disabled = true;
+  document.getElementById('clearBtn').style.display = 'none';
+  document.getElementById('csvFile').value = '';
+}
+
+function buildDoctorFilter() {
+  var bills = groupByBill(allCsvRows);
+  var grouped = groupByDoctor(bills);
+  detectedDoctors = {};
+
+  // Count bills per known doctor
+  Object.keys(grouped.doctorBills).forEach(function(docIdStr) {
+    var docId = parseInt(docIdStr);
+    var doc = getDoctorById(docId);
+    if (doc) {
+      detectedDoctors[docId] = { name: doc.display_name || doc.name, billCount: grouped.doctorBills[docId].length };
+    }
+  });
+
+  var container = document.getElementById('doctorCheckboxes');
+  var docIds = Object.keys(detectedDoctors).sort(function(a, b) {
+    return detectedDoctors[a].name.localeCompare(detectedDoctors[b].name);
+  });
+
+  if (docIds.length === 0) {
+    container.innerHTML = '<p style="color:#a0aec0">No registered doctors found in uploaded data. All bills will appear as flags.</p>';
+  } else {
+    container.innerHTML = docIds.map(function(id) {
+      var d = detectedDoctors[id];
+      return '<label style="display:flex;align-items:center;gap:6px;padding:6px 12px;background:#f7fafc;border-radius:6px;font-weight:400;font-size:13px;cursor:pointer">' +
+        '<input type="checkbox" class="doc-filter-chk" value="' + id + '" checked>' +
+        d.name + ' <span style="color:#a0aec0">(' + d.billCount + ' bills)</span></label>';
+    }).join('');
+  }
+
+  document.getElementById('doctorFilter').classList.remove('hidden');
+
+  // Also show flag count
+  if (grouped.flags.length > 0) {
+    container.innerHTML += '<div style="margin-top:8px;font-size:13px;color:#c53030">+ ' + grouped.flags.length + ' bills with unknown doctors (will show in Flags)</div>';
+  }
+}
+
+function toggleAllDoctors(selectAll) {
+  document.querySelectorAll('.doc-filter-chk').forEach(function(cb) { cb.checked = selectAll; });
 }
 
 // ============ LAYER 1: CSV PARSER ============
@@ -924,6 +1037,7 @@ function groupByBill(rows) {
         refDoctor: r['Ref. Doctor'] || r['Ref. Doctor Name'] || r['Ref Doctor Name'] || '',
         sponsor: r['Sponsor'] || '',
         ipOp: r['IP/OP'] || r['IPOP'] || ipOp,
+        _centre: r._centre || 'Unknown',
         rows: []
       };
     }
@@ -1211,8 +1325,16 @@ function calcSettlement(docId, billResults, contract) {
 
 // ============ LAYER 5: PROCESS & DISPLAY ============
 function processCSV() {
-  if (!csvRows || csvRows.length === 0) { alert('No CSV data loaded'); return; }
-  var bills = groupByBill(csvRows);
+  if (!allCsvRows || allCsvRows.length === 0) { alert('No CSV data loaded'); return; }
+
+  // Get selected doctor IDs
+  var selectedDocIds = {};
+  var anyChecked = false;
+  document.querySelectorAll('.doc-filter-chk').forEach(function(cb) {
+    if (cb.checked) { selectedDocIds[cb.value] = true; anyChecked = true; }
+  });
+
+  var bills = groupByBill(allCsvRows);
   var grouped = groupByDoctor(bills);
   allFlags = grouped.flags;
 
@@ -1220,19 +1342,36 @@ function processCSV() {
   var doctorBills = grouped.doctorBills;
 
   Object.keys(doctorBills).forEach(function(docIdStr) {
+    // Apply doctor filter
+    if (anyChecked && !selectedDocIds[docIdStr]) return;
+
     var docId = parseInt(docIdStr);
     var doc = getDoctorById(docId);
     var contract = DOC_DATA.contractMap[docId] || null;
     var packages = DOC_DATA.packageMap[docId] || [];
     var bills = doctorBills[docId];
 
+    // Detect centres this doctor has bills from
+    var centresUsed = {};
+    bills.forEach(function(bill) {
+      var c = bill._centre || 'Unknown';
+      if (!centresUsed[c]) centresUsed[c] = 0;
+      centresUsed[c]++;
+    });
+
     var billResults = [];
     var billFlags = [];
+    var payorBreakdown = { CASH: 0, TPA: 0, PMJAY: 0, Govt: 0, OPD: 0 };
+
     bills.forEach(function(bill) {
       var br = calcBillEarning(bill, contract, packages);
       br.bill = bill;
+      br.centre = bill._centre || 'Unknown';
       billResults.push(br);
       if (br.flagged) billFlags.push(br);
+      // Track payor breakdown
+      if (br.baseMethod.indexOf('OPD') === 0) { payorBreakdown.OPD += br.earning; }
+      else { payorBreakdown[br.payor] = (payorBreakdown[br.payor] || 0) + br.earning; }
     });
 
     var settlement = calcSettlement(docId, billResults, contract);
@@ -1243,7 +1382,9 @@ function processCSV() {
       contract: contract,
       billResults: billResults,
       billFlags: billFlags,
-      settlement: settlement
+      settlement: settlement,
+      centresUsed: centresUsed,
+      payorBreakdown: payorBreakdown
     });
   });
 
@@ -1257,40 +1398,68 @@ function displayResults(results) {
   document.getElementById('results').classList.remove('hidden');
 
   var totalPayout = 0, totalPool = 0, totalBills = 0, flagCount = allFlags.length;
+  var hospitalShortfall = 0;
   results.forEach(function(r) {
     totalPayout += r.settlement.payout;
     totalPool += r.settlement.pool;
     totalBills += r.billResults.length;
     flagCount += r.billFlags.length;
+    if (r.settlement.mgmTriggered) hospitalShortfall += (r.settlement.payout - r.settlement.pool);
   });
 
   document.getElementById('resultStats').innerHTML =
     '<div class="stat-card"><div class="label">Doctors</div><div class="value">' + results.length + '</div></div>' +
     '<div class="stat-card"><div class="label">Total Bills</div><div class="value">' + totalBills + '</div></div>' +
-    '<div class="stat-card"><div class="label">Total Pool</div><div class="value">' + fmtRs(totalPool) + '</div></div>' +
-    '<div class="stat-card"><div class="label">Total Payout</div><div class="value" style="color:#276749">' + fmtRs(totalPayout) + '</div></div>' +
+    '<div class="stat-card"><div class="label">Total Prof Fee Pool</div><div class="value" style="color:#2b6cb0">' + fmtRs(totalPool) + '</div><div class="sub">Actual earnings from bills</div></div>' +
+    '<div class="stat-card"><div class="label">Total Payout</div><div class="value" style="color:#276749">' + fmtRs(totalPayout) + '</div><div class="sub">After MGM/settlement applied</div></div>' +
+    (hospitalShortfall > 0 ? '<div class="stat-card"><div class="label">Hospital MGM Shortfall</div><div class="value" style="color:#c53030">' + fmtRs(hospitalShortfall) + '</div><div class="sub">Hospital absorbing deficit</div></div>' : '') +
     '<div class="stat-card"><div class="label">Flags</div><div class="value" style="color:' + (flagCount > 0 ? '#c53030' : '#276749') + '">' + flagCount + '</div></div>';
 
   var html = '';
   results.forEach(function(r, idx) {
     var doc = r.doctor;
     var s = r.settlement;
-    var ct = r.contract ? r.contract.contract_type : '—';
+    var ct = r.contract ? r.contract.contract_type : '\\u2014';
     var cardClass = 'card result-card';
     if (s.mgmTriggered) cardClass += ' mgm-triggered';
     if (s.incentiveTriggered) cardClass += ' incentive-triggered';
 
     var triggers = '';
-    if (s.mgmTriggered) triggers += '<span class="trigger-badge trigger-mgm">MGM Triggered</span>';
+    if (s.mgmTriggered) triggers += '<span class="trigger-badge trigger-mgm">MGM Triggered (shortfall: ' + fmtRs(s.payout - s.pool) + ')</span>';
     if (s.incentiveTriggered) triggers += '<span class="trigger-badge trigger-incentive">Incentive: ' + fmtRs(s.incentiveAmount) + '</span>';
+
+    // Centre badges
+    var centreBadges = '';
+    if (r.centresUsed) {
+      Object.keys(r.centresUsed).forEach(function(c) {
+        centreBadges += '<span class="badge badge-active" style="margin-left:4px">' + c + ' (' + r.centresUsed[c] + ')</span>';
+      });
+    }
+    if (Object.keys(r.centresUsed || {}).length > 1) {
+      centreBadges += '<span class="badge" style="background:#fed7d7;color:#c53030;margin-left:4px">Multi-Centre</span>';
+    }
+
+    // Payor breakdown mini-bar
+    var pb = r.payorBreakdown || {};
+    var pbParts = [];
+    if (pb.CASH > 0) pbParts.push('CASH: ' + fmtRs(pb.CASH));
+    if (pb.TPA > 0) pbParts.push('TPA: ' + fmtRs(pb.TPA));
+    if (pb.PMJAY > 0) pbParts.push('PMJAY: ' + fmtRs(pb.PMJAY));
+    if (pb.Govt > 0) pbParts.push('Govt: ' + fmtRs(pb.Govt));
+    if (pb.OPD > 0) pbParts.push('OPD: ' + fmtRs(pb.OPD));
+    var payorLine = pbParts.length > 0 ? '<div style="font-size:12px;color:#718096;margin-top:4px">' + pbParts.join(' | ') + '</div>' : '';
 
     html += '<div class="' + cardClass + '">' +
       '<div class="card-header collapsible" onclick="toggleCollapse(' + idx + ')">' +
-        '<div><div class="card-title">' + (doc ? doc.display_name || doc.name : 'Unknown') + ' <span class="badge ' + badgeClass(ct) + '">' + ct + '</span>' + triggers + '</div>' +
-        '<div class="pool-amount">Pool: ' + fmtRs(s.pool) + (s.pmjayPool > 0 ? ' (PMJAY: ' + fmtRs(s.pmjayPool) + ')' : '') + '</div></div>' +
+        '<div style="flex:1">' +
+          '<div class="card-title">' + (doc ? doc.display_name || doc.name : 'Unknown') + ' <span class="badge ' + badgeClass(ct) + '">' + ct + '</span>' + centreBadges + triggers + '</div>' +
+          '<div class="pool-amount" style="margin-top:4px">Prof Fee Pool: <strong>' + fmtRs(s.pool) + '</strong>' + (s.pmjayPool > 0 ? ' (PMJAY: ' + fmtRs(s.pmjayPool) + ')' : '') + ' \\u2192 Payout: <strong style="color:#276749">' + fmtRs(s.payout) + '</strong></div>' +
+          payorLine +
+        '</div>' +
         '<div class="payout-amount">' + fmtRs(s.payout) + '</div>' +
       '</div>' +
       '<div class="collapsible-content" id="collapse_' + idx + '">' +
+        buildPoolSummary(r) +
         buildBillTable(r.billResults) +
         (r.billFlags.length > 0 ? '<div class="flag-card card" style="margin-top:12px"><h3 style="color:#c53030">Flagged Bills (' + r.billFlags.length + ')</h3>' + buildFlagTable(r.billFlags) + '</div>' : '') +
       '</div>' +
@@ -1299,7 +1468,7 @@ function displayResults(results) {
 
   // Unresolved flags (unknown doctors)
   if (allFlags.length > 0) {
-    html += '<div class="flag-card card"><h3 style="color:#c53030">Unresolved Flags — Unknown Doctors (' + allFlags.length + ')</h3><table><thead><tr><th>Bill No</th><th>Patient</th><th>Doctor (eCW)</th><th>Reason</th></tr></thead><tbody>';
+    html += '<div class="flag-card card"><h3 style="color:#c53030">Unresolved Flags \\u2014 Unknown Doctors (' + allFlags.length + ')</h3><table><thead><tr><th>Bill No</th><th>Patient</th><th>Doctor (eCW)</th><th>Reason</th></tr></thead><tbody>';
     allFlags.forEach(function(f) {
       html += '<tr><td>' + f.bill.billNo + '</td><td>' + f.bill.patientName + '</td><td>' + f.bill.consultDoctor + '</td><td><span class="flag-badge">' + f.reason + '</span></td></tr>';
     });
@@ -1327,6 +1496,37 @@ function displayResults(results) {
   document.getElementById('flagsList').innerHTML = flagsHtml;
 }
 
+function buildPoolSummary(r) {
+  var s = r.settlement;
+  var c = r.contract;
+  var pb = r.payorBreakdown || {};
+  var h = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px;margin-bottom:16px;padding:12px;background:#f7fafc;border-radius:8px">';
+
+  h += '<div><div style="font-size:11px;color:#718096;font-weight:600">TOTAL POOL</div><div style="font-size:18px;font-weight:700;color:#2b6cb0">' + fmtRs(s.pool) + '</div></div>';
+
+  if (pb.CASH > 0) h += '<div><div style="font-size:11px;color:#718096">CASH</div><div style="font-size:14px;font-weight:600">' + fmtRs(pb.CASH) + '</div></div>';
+  if (pb.TPA > 0) h += '<div><div style="font-size:11px;color:#718096">TPA</div><div style="font-size:14px;font-weight:600">' + fmtRs(pb.TPA) + '</div></div>';
+  if (pb.PMJAY > 0) h += '<div><div style="font-size:11px;color:#718096">PMJAY</div><div style="font-size:14px;font-weight:600">' + fmtRs(pb.PMJAY) + '</div></div>';
+  if (pb.Govt > 0) h += '<div><div style="font-size:11px;color:#718096">GOVT</div><div style="font-size:14px;font-weight:600">' + fmtRs(pb.Govt) + '</div></div>';
+  if (pb.OPD > 0) h += '<div><div style="font-size:11px;color:#718096">OPD</div><div style="font-size:14px;font-weight:600">' + fmtRs(pb.OPD) + '</div></div>';
+
+  h += '<div><div style="font-size:11px;color:#718096;font-weight:600">FINAL PAYOUT</div><div style="font-size:18px;font-weight:700;color:#276749">' + fmtRs(s.payout) + '</div></div>';
+
+  if (c && c.contract_type === 'MGM') {
+    h += '<div><div style="font-size:11px;color:#718096">MGM Floor</div><div style="font-size:14px;font-weight:600">' + fmtRs(c.mgm_amount) + '</div></div>';
+    h += '<div><div style="font-size:11px;color:#718096">Threshold</div><div style="font-size:14px;font-weight:600">' + fmtRs(c.threshold_amount) + '</div></div>';
+    if (s.mgmTriggered) {
+      h += '<div><div style="font-size:11px;color:#c53030;font-weight:600">SHORTFALL</div><div style="font-size:14px;font-weight:700;color:#c53030">' + fmtRs(s.payout - s.pool) + '</div></div>';
+    }
+    if (s.incentiveTriggered) {
+      h += '<div><div style="font-size:11px;color:#276749;font-weight:600">INCENTIVE</div><div style="font-size:14px;font-weight:700;color:#276749">' + fmtRs(s.incentiveAmount) + '</div></div>';
+    }
+  }
+
+  h += '</div>';
+  return h;
+}
+
 function badgeClass(type) {
   var map = { MGM: 'badge-mgm', FFS: 'badge-ffs', Retainer: 'badge-retainer', Salary: 'badge-salary', Throughput: 'badge-throughput', ReverseBilling: 'badge-rb' };
   return map[type] || 'badge-mgm';
@@ -1338,11 +1538,11 @@ function toggleCollapse(idx) {
 }
 
 function buildBillTable(billResults) {
-  var h = '<table style="font-size:13px"><thead><tr><th>Bill No</th><th>Date</th><th>Patient</th><th>Ref Doctor</th><th>Payor</th><th>Method</th><th>Base</th><th>Split</th><th>Earning</th></tr></thead><tbody>';
+  var h = '<table style="font-size:13px"><thead><tr><th>Bill No</th><th>Date</th><th>Patient</th><th>Centre</th><th>Ref Doctor</th><th>Payor</th><th>Method</th><th>Base</th><th>Split</th><th>Earning</th></tr></thead><tbody>';
   billResults.forEach(function(br) {
     var flagStyle = br.flagged ? ' style="background:#fff5f5"' : '';
-    h += '<tr' + flagStyle + '><td>' + br.bill.billNo + '</td><td>' + fmtDate(br.bill.billDate) + '</td><td>' + br.bill.patientName + '</td><td>' + (br.bill.refDoctor || '—') + '</td><td>' + br.payor + (br.bill.sponsor ? ' (' + br.bill.sponsor.substring(0,20) + ')' : '') + '</td><td>' + br.baseMethod + (br.pkgOverride ? ' <span class="flag-badge" style="background:#ebf4ff;color:#2b6cb0">PKG</span>' : '') + '</td><td>' + fmtRs(br.baseAmount) + '</td><td>' + br.splitPct + '%' + (br.selfRef ? ' (self)' : '') + '</td><td style="font-weight:600">' + fmtRs(br.earning) + '</td></tr>';
-    if (br.flagged) h += '<tr style="background:#fff5f5"><td colspan="9" style="color:#c53030;font-size:12px">⚠ ' + br.flagReason + '</td></tr>';
+    h += '<tr' + flagStyle + '><td>' + br.bill.billNo + '</td><td>' + fmtDate(br.bill.billDate) + '</td><td>' + br.bill.patientName + '</td><td><span class="badge badge-active" style="font-size:11px">' + (br.centre || '—') + '</span></td><td>' + (br.bill.refDoctor || '—') + '</td><td>' + br.payor + (br.bill.sponsor ? ' (' + br.bill.sponsor.substring(0,20) + ')' : '') + '</td><td>' + br.baseMethod + (br.pkgOverride ? ' <span class="flag-badge" style="background:#ebf4ff;color:#2b6cb0">PKG</span>' : '') + '</td><td>' + fmtRs(br.baseAmount) + '</td><td>' + br.splitPct + '%' + (br.selfRef ? ' (self)' : '') + '</td><td style="font-weight:600">' + fmtRs(br.earning) + '</td></tr>';
+    if (br.flagged) h += '<tr style="background:#fff5f5"><td colspan="10" style="color:#c53030;font-size:12px">\\u26A0 ' + br.flagReason + '</td></tr>';
   });
   h += '</tbody></table>';
   return h;
@@ -1408,9 +1608,14 @@ function processManualBill() {
 
   var br = calcBillEarning(bill, contract, packages);
   br.bill = bill;
+  br.centre = 'Manual';
+
+  var payorBreakdown = { CASH: 0, TPA: 0, PMJAY: 0, Govt: 0, OPD: 0 };
+  if (br.baseMethod.indexOf('OPD') === 0) { payorBreakdown.OPD = br.earning; }
+  else { payorBreakdown[br.payor] = br.earning; }
 
   var settlement = calcSettlement(docId, [br], contract);
-  calcResults = [{ docId: docId, doctor: doc, contract: contract, billResults: [br], billFlags: br.flagged ? [br] : [], settlement: settlement }];
+  calcResults = [{ docId: docId, doctor: doc, contract: contract, billResults: [br], billFlags: br.flagged ? [br] : [], settlement: settlement, centresUsed: { Manual: 1 }, payorBreakdown: payorBreakdown }];
   allFlags = [];
   displayResults(calcResults);
   manualBillRows = [];
@@ -1420,25 +1625,34 @@ function processManualBill() {
 // ============ EXPORT CSV ============
 function exportResultsCSV() {
   if (!calcResults) return;
-  var lines = ['Doctor,Contract Type,Pool,PMJAY Pool,Payout,MGM Triggered,Incentive Triggered,Incentive Amt'];
+  var lines = ['Doctor,Contract Type,Prof Fee Pool,CASH Pool,TPA Pool,PMJAY Pool,Govt Pool,OPD Pool,Final Payout,MGM Triggered,Incentive Triggered,Incentive Amt,Shortfall,Centres'];
   calcResults.forEach(function(r) {
     var doc = r.doctor;
     var s = r.settlement;
+    var pb = r.payorBreakdown || {};
+    var centres = Object.keys(r.centresUsed || {}).join('+');
+    var shortfall = s.mgmTriggered ? (s.payout - s.pool) : 0;
     lines.push([
       '"' + (doc ? doc.name : 'Unknown') + '"',
       r.contract ? r.contract.contract_type : '',
       s.pool.toFixed(2),
-      s.pmjayPool.toFixed(2),
+      (pb.CASH || 0).toFixed(2),
+      (pb.TPA || 0).toFixed(2),
+      (pb.PMJAY || 0).toFixed(2),
+      (pb.Govt || 0).toFixed(2),
+      (pb.OPD || 0).toFixed(2),
       s.payout.toFixed(2),
       s.mgmTriggered ? 'Yes' : 'No',
       s.incentiveTriggered ? 'Yes' : 'No',
-      s.incentiveAmount.toFixed(2)
+      s.incentiveAmount.toFixed(2),
+      shortfall.toFixed(2),
+      centres
     ].join(','));
   });
   var blob = new Blob([lines.join('\\n')], { type: 'text/csv' });
   var a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = 'medpay_' + document.getElementById('calc_month').value + '_' + document.getElementById('calc_centre').value + '.csv';
+  a.download = 'medpay_' + document.getElementById('calc_month').value + '.csv';
   a.click();
 }
 
@@ -1446,16 +1660,22 @@ function exportResultsCSV() {
 async function saveSettlements() {
   if (!calcResults || calcResults.length === 0) { alert('No results to save'); return; }
   var month = document.getElementById('calc_month').value;
-  var centre = document.getElementById('calc_centre').value;
-  if (!month || !centre) { alert('Select month and centre'); return; }
+  if (!month) { alert('Select month'); return; }
 
-  if (!confirm('Save ' + calcResults.length + ' settlement(s) for ' + month + ' at ' + centre + '?')) return;
+  var centresSummary = [];
+  calcResults.forEach(function(r) {
+    var centres = Object.keys(r.centresUsed || {});
+    centres.forEach(function(c) { if (centresSummary.indexOf(c) < 0) centresSummary.push(c); });
+  });
+
+  if (!confirm('Save ' + calcResults.length + ' settlement(s) for ' + month + ' across ' + centresSummary.join(', ') + '?')) return;
 
   var payload = calcResults.map(function(r) {
+    var primaryCentre = Object.keys(r.centresUsed || {})[0] || 'Unknown';
     return {
       doctor_id: r.docId,
       month: month,
-      centre: centre,
+      centre: primaryCentre,
       calculated_pool: r.settlement.pool,
       pmjay_pool: r.settlement.pmjayPool,
       final_payout: r.settlement.payout,
@@ -1477,7 +1697,7 @@ async function saveSettlements() {
           doctor_earning: br.earning,
           pkg_override: br.pkgOverride ? 1 : 0,
           pkg_name: br.pkgName,
-          centre: centre,
+          centre: br.centre || primaryCentre,
           bill_date: br.bill.billDate,
           flagged: br.flagged ? 1 : 0,
           flag_reason: br.flagReason
