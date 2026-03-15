@@ -72,6 +72,11 @@ CREATE TABLE IF NOT EXISTS monthly_settlements (
   incentive_amount REAL,
   notes TEXT,
   locked INTEGER DEFAULT 0,
+  payment_utr TEXT,
+  payment_date TEXT,
+  payment_bank TEXT,
+  payment_mode TEXT,
+  payment_amount REAL,
   created_at TEXT DEFAULT (datetime('now'))
 );
 

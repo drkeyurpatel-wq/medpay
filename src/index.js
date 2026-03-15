@@ -1745,19 +1745,22 @@ async function settlementsPage(env, searchParams) {
 
   let rows = '';
   for (const s of settlements) {
+    const hasPmt = !!s.payment_utr;
+    const pmtBadge = hasPmt ? `<span class="badge badge-active">Paid</span>` : (s.locked ? `<span class="badge" style="background:#fefcbf;color:#975a16">Awaiting Payment</span>` : '');
     rows += `<tr>
       <td>${s.month}</td>
       <td>${s.centre}</td>
       <td style="font-weight:600">${s.display_name || s.doctor_name}</td>
       <td>${fmtRs(s.calculated_pool)}</td>
-      <td>${fmtRs(s.pmjay_pool)}</td>
       <td style="font-weight:700;color:#276749">${fmtRs(s.final_payout)}</td>
-      <td>${s.mgm_triggered ? '<span class="trigger-badge trigger-mgm">MGM</span>' : ''}${s.incentive_triggered ? '<span class="trigger-badge trigger-incentive">Incentive: ' + fmtRs(s.incentive_amount) + '</span>' : ''}</td>
-      <td><span class="badge ${s.locked ? 'badge-active' : 'badge-inactive'}">${s.locked ? 'Locked' : 'Draft'}</span></td>
+      <td>${s.mgm_triggered ? '<span class="trigger-badge trigger-mgm">MGM</span>' : ''}${s.incentive_triggered ? '<span class="trigger-badge trigger-incentive">Incentive</span>' : ''}</td>
+      <td><span class="badge ${s.locked ? 'badge-active' : 'badge-inactive'}">${s.locked ? 'Locked' : 'Draft'}</span> ${pmtBadge}</td>
       <td>
         <div class="btn-group">
           <button class="btn btn-outline btn-sm" onclick="viewBills(${s.id})">Bills</button>
-          ${!s.locked ? '<button class="btn btn-success btn-sm" onclick="lockSettlement(' + s.id + ')">Lock</button>' : '<button class="btn btn-danger btn-sm" onclick="unlockSettlement(' + s.id + ')">Unlock</button>'}
+          ${s.locked ? '<button class="btn btn-sm" style="background:#ebf4ff;color:#2b6cb0" onclick="showPaymentModal(' + s.id + ', ' + JSON.stringify(JSON.stringify({utr: s.payment_utr||'', date: s.payment_date||'', bank: s.payment_bank||'', mode: s.payment_mode||'', amount: s.payment_amount||s.final_payout})) + ')">Payment</button>' : ''}
+          ${s.locked && hasPmt ? '<a href="/statement/' + s.id + '" target="_blank" class="btn btn-success btn-sm">Statement</a>' : ''}
+          ${!s.locked ? '<button class="btn btn-success btn-sm" onclick="lockSettlement(' + s.id + ')">Lock</button>' : '<button class="btn btn-outline btn-sm" onclick="unlockSettlement(' + s.id + ')">Unlock</button>'}
           ${!s.locked ? '<button class="btn btn-danger btn-sm" onclick="deleteSettlement(' + s.id + ')">Delete</button>' : ''}
         </div>
       </td>
@@ -1784,14 +1787,41 @@ async function settlementsPage(env, searchParams) {
     </div>
     <div class="card" style="padding:0;overflow-x:auto">
       <table>
-        <thead><tr><th>Month</th><th>Centre</th><th>Doctor</th><th>Pool</th><th>PMJAY</th><th>Payout</th><th>Triggers</th><th>Status</th><th>Actions</th></tr></thead>
-        <tbody>${rows || '<tr><td colspan="9" style="text-align:center;padding:24px;color:#a0aec0">No settlements found.</td></tr>'}</tbody>
+        <thead><tr><th>Month</th><th>Centre</th><th>Doctor</th><th>Pool</th><th>Payout</th><th>Triggers</th><th>Status</th><th>Actions</th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="8" style="text-align:center;padding:24px;color:#a0aec0">No settlements found.</td></tr>'}</tbody>
       </table>
     </div>
     <div id="billModal" class="hidden" style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:200;display:flex;align-items:center;justify-content:center">
       <div class="card" style="max-width:900px;width:95%;max-height:80vh;overflow-y:auto">
         <div class="card-header"><div class="card-title">Bill Breakdown</div><button class="btn btn-outline btn-sm" onclick="closeBillModal()">Close</button></div>
         <div id="billModalContent"></div>
+      </div>
+    </div>
+    <div id="paymentModal" class="hidden" style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:200;display:flex;align-items:center;justify-content:center">
+      <div class="card" style="max-width:500px;width:95%">
+        <div class="card-header"><div class="card-title">Record Payment</div><button class="btn btn-outline btn-sm" onclick="closePaymentModal()">Close</button></div>
+        <input type="hidden" id="pmt_settlement_id">
+        <div class="form-group"><label>UTR / Reference No. *</label><input type="text" id="pmt_utr" placeholder="e.g. AXISN12345678"></div>
+        <div class="form-row">
+          <div class="form-group"><label>Payment Date *</label><input type="date" id="pmt_date"></div>
+          <div class="form-group"><label>Amount (Rs.) *</label><input type="number" id="pmt_amount" step="0.01"></div>
+        </div>
+        <div class="form-row">
+          <div class="form-group"><label>Bank</label><input type="text" id="pmt_bank" placeholder="e.g. HDFC Bank"></div>
+          <div class="form-group"><label>Mode</label>
+            <select id="pmt_mode">
+              <option value="NEFT">NEFT</option>
+              <option value="RTGS">RTGS</option>
+              <option value="UPI">UPI</option>
+              <option value="Cheque">Cheque</option>
+              <option value="Cash">Cash</option>
+              <option value="Other">Other</option>
+            </select>
+          </div>
+        </div>
+        <div style="text-align:right;margin-top:16px">
+          <button class="btn btn-primary" onclick="savePayment()">Save Payment</button>
+        </div>
       </div>
     </div>
   `;
@@ -1847,6 +1877,47 @@ function closeBillModal() {
   var modal = document.getElementById('billModal');
   modal.classList.add('hidden');
   modal.style.display = 'none';
+}
+
+function showPaymentModal(id, dataJson) {
+  var data = JSON.parse(dataJson);
+  document.getElementById('pmt_settlement_id').value = id;
+  document.getElementById('pmt_utr').value = data.utr || '';
+  document.getElementById('pmt_date').value = data.date || new Date().toISOString().slice(0,10);
+  document.getElementById('pmt_bank').value = data.bank || '';
+  document.getElementById('pmt_mode').value = data.mode || 'NEFT';
+  document.getElementById('pmt_amount').value = data.amount || '';
+  var modal = document.getElementById('paymentModal');
+  modal.classList.remove('hidden');
+  modal.style.display = 'flex';
+}
+
+function closePaymentModal() {
+  var modal = document.getElementById('paymentModal');
+  modal.classList.add('hidden');
+  modal.style.display = 'none';
+}
+
+async function savePayment() {
+  var id = document.getElementById('pmt_settlement_id').value;
+  var utr = document.getElementById('pmt_utr').value.trim();
+  var dt = document.getElementById('pmt_date').value;
+  var amt = document.getElementById('pmt_amount').value;
+  if (!utr || !dt || !amt) { alert('UTR, date and amount are required'); return; }
+  var payload = {
+    payment_utr: utr,
+    payment_date: dt,
+    payment_bank: document.getElementById('pmt_bank').value.trim(),
+    payment_mode: document.getElementById('pmt_mode').value,
+    payment_amount: parseFloat(amt)
+  };
+  var r = await fetch('/api/settlements/' + id + '/payment', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  if (r.ok) { closePaymentModal(); location.reload(); }
+  else alert('Error: ' + (await r.text()));
 }
 </script>`;
 
@@ -2102,7 +2173,276 @@ async function handleApi(request, env, path) {
     return Response.json({ success: true });
   }
 
+  // PUT /api/settlements/:id/payment
+  const pmtMatch = path.match(/^\/api\/settlements\/(\d+)\/payment$/);
+  if (pmtMatch && method === 'PUT') {
+    if (!json) return new Response('No data', { status: 400 });
+    const sid = parseInt(pmtMatch[1]);
+    await env.DB.prepare('UPDATE monthly_settlements SET payment_utr = ?, payment_date = ?, payment_bank = ?, payment_mode = ?, payment_amount = ? WHERE id = ?').bind(
+      json.payment_utr, json.payment_date, json.payment_bank, json.payment_mode, json.payment_amount, sid
+    ).run();
+    return Response.json({ success: true });
+  }
+
+  // GET /api/statement/:id — full data for statement generation
+  const stmtMatch = path.match(/^\/api\/statement\/(\d+)$/);
+  if (stmtMatch && method === 'GET') {
+    const sid = parseInt(stmtMatch[1]);
+    const settlement = await env.DB.prepare('SELECT ms.*, d.name as doctor_name, d.display_name FROM monthly_settlements ms JOIN doctors d ON d.id = ms.doctor_id WHERE ms.id = ?').bind(sid).first();
+    if (!settlement) return new Response('Not found', { status: 404 });
+    const contract = await env.DB.prepare('SELECT * FROM contracts WHERE doctor_id = ?').bind(settlement.doctor_id).first();
+    const bills = (await env.DB.prepare('SELECT * FROM bill_calculations WHERE settlement_id = ? ORDER BY bill_date, bill_no').bind(sid).all()).results || [];
+    return Response.json({ settlement, contract, bills });
+  }
+
   return new Response('Not found', { status: 404 });
+}
+
+// ===================== PAGE: Payout Statement =====================
+async function statementPage(env, settlementId) {
+  const settlement = await env.DB.prepare('SELECT ms.*, d.name as doctor_name, d.display_name FROM monthly_settlements ms JOIN doctors d ON d.id = ms.doctor_id WHERE ms.id = ?').bind(settlementId).first();
+  if (!settlement) return htmlShell('Not Found', '', '<h1>Statement not found</h1>');
+
+  const contract = await env.DB.prepare('SELECT * FROM contracts WHERE doctor_id = ?').bind(settlement.doctor_id).first();
+  const bills = (await env.DB.prepare('SELECT * FROM bill_calculations WHERE settlement_id = ? ORDER BY bill_date, bill_no').bind(settlementId).all()).results || [];
+
+  // Compute payor breakdown
+  let cashPool = 0, tpaPool = 0, pmjayPool = 0, govtPool = 0, opdPool = 0;
+  let ipCount = 0, opCount = 0;
+  for (const b of bills) {
+    const amt = b.doctor_earning || 0;
+    if ((b.base_method || '').indexOf('OPD') === 0) { opdPool += amt; opCount++; }
+    else if (b.payor_type === 'CASH') { cashPool += amt; ipCount++; }
+    else if (b.payor_type === 'TPA') { tpaPool += amt; ipCount++; }
+    else if (b.payor_type === 'PMJAY') { pmjayPool += amt; ipCount++; }
+    else if (b.payor_type === 'Govt') { govtPool += amt; ipCount++; }
+    else { cashPool += amt; ipCount++; }
+  }
+
+  const months = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+  const [yr, mn] = (settlement.month || '').split('-');
+  const monthLabel = months[parseInt(mn) - 1] + ' ' + yr;
+
+  const ctype = contract ? contract.contract_type : '—';
+  const pool = settlement.calculated_pool || 0;
+  const payout = settlement.final_payout || 0;
+
+  // Bill rows HTML
+  let billRowsHtml = '';
+  let sno = 1;
+  for (const b of bills) {
+    billRowsHtml += `<tr>
+      <td>${sno++}</td>
+      <td>${b.bill_no || ''}</td>
+      <td>${b.bill_date || ''}</td>
+      <td>${b.patient_name || ''}</td>
+      <td>${b.payor_type || ''}${b.payor_raw ? ' (' + (b.payor_raw || '').substring(0, 25) + ')' : ''}</td>
+      <td>${b.base_method || ''}</td>
+      <td style="text-align:right">${fmtRs(b.base_amount)}</td>
+      <td style="text-align:center">${b.split_pct || 100}%${b.self_ref ? ' (S)' : ''}</td>
+      <td style="text-align:right;font-weight:600">${fmtRs(b.doctor_earning)}</td>
+    </tr>`;
+  }
+
+  // Settlement calculation explanation
+  let calcExplanation = '';
+  if (ctype === 'MGM') {
+    calcExplanation = `
+      <tr><td>Professional Fee Pool (from bills)</td><td style="text-align:right">${fmtRs(pool)}</td></tr>
+      <tr><td>Monthly Minimum Guarantee (MGM)</td><td style="text-align:right">${fmtRs(contract.mgm_amount)}</td></tr>
+      <tr><td>Incentive Threshold</td><td style="text-align:right">${fmtRs(contract.threshold_amount)}</td></tr>`;
+    if (settlement.mgm_triggered) {
+      calcExplanation += `
+      <tr style="color:#c53030"><td>Pool below MGM — hospital covers shortfall of ${fmtRs(payout - pool)}</td><td style="text-align:right;font-weight:700">${fmtRs(payout)}</td></tr>`;
+    } else if (settlement.incentive_triggered) {
+      calcExplanation += `
+      <tr><td>Pool exceeded threshold by ${fmtRs(pool - contract.threshold_amount)}</td><td></td></tr>
+      <tr><td>Incentive (${contract.incentive_pct}% of excess)</td><td style="text-align:right">${fmtRs(settlement.incentive_amount)}</td></tr>
+      <tr style="font-weight:700"><td>Final Payout (threshold + incentive)</td><td style="text-align:right">${fmtRs(payout)}</td></tr>`;
+    } else {
+      calcExplanation += `
+      <tr><td>Pool between MGM and threshold — paid at pool</td><td style="text-align:right;font-weight:700">${fmtRs(payout)}</td></tr>`;
+    }
+  } else if (ctype === 'Retainer') {
+    calcExplanation = `
+      <tr><td>Fixed Retainer Amount</td><td style="text-align:right">${fmtRs(contract.mgm_amount)}</td></tr>
+      ${contract.retainer_pool_pct ? '<tr><td>Pool Bonus (' + contract.retainer_pool_pct + '% of ' + fmtRs(pool) + ')</td><td style="text-align:right">' + fmtRs(pool * contract.retainer_pool_pct / 100) + '</td></tr>' : ''}
+      <tr style="font-weight:700"><td>Final Payout</td><td style="text-align:right">${fmtRs(payout)}</td></tr>`;
+  } else {
+    calcExplanation = `
+      <tr><td>Professional Fee Pool (from bills)</td><td style="text-align:right">${fmtRs(pool)}</td></tr>
+      <tr style="font-weight:700"><td>Final Payout</td><td style="text-align:right">${fmtRs(payout)}</td></tr>`;
+  }
+
+  // Payment section
+  let paymentHtml = '';
+  if (settlement.payment_utr) {
+    paymentHtml = `
+    <table style="width:100%;margin-top:20px;border-collapse:collapse">
+      <tr><td style="padding:6px 0;border-bottom:1px solid #e2e8f0;width:40%"><strong>Payment Reference (UTR)</strong></td><td style="padding:6px 0;border-bottom:1px solid #e2e8f0">${settlement.payment_utr}</td></tr>
+      <tr><td style="padding:6px 0;border-bottom:1px solid #e2e8f0"><strong>Payment Date</strong></td><td style="padding:6px 0;border-bottom:1px solid #e2e8f0">${settlement.payment_date || '—'}</td></tr>
+      <tr><td style="padding:6px 0;border-bottom:1px solid #e2e8f0"><strong>Payment Mode</strong></td><td style="padding:6px 0;border-bottom:1px solid #e2e8f0">${settlement.payment_mode || '—'}</td></tr>
+      <tr><td style="padding:6px 0;border-bottom:1px solid #e2e8f0"><strong>Bank</strong></td><td style="padding:6px 0;border-bottom:1px solid #e2e8f0">${settlement.payment_bank || '—'}</td></tr>
+      <tr><td style="padding:6px 0;border-bottom:1px solid #e2e8f0"><strong>Amount Paid</strong></td><td style="padding:6px 0;border-bottom:1px solid #e2e8f0;font-weight:700;font-size:16px">${fmtRs(settlement.payment_amount)}</td></tr>
+    </table>`;
+  }
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Payout Statement — ${settlement.display_name || settlement.doctor_name} — ${monthLabel}</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color: #1a202c; background: #f0f2f5; }
+    .page { max-width: 900px; margin: 20px auto; background: #fff; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+    .page-inner { padding: 48px; }
+    .header { display: flex; justify-content: space-between; align-items: flex-start; padding-bottom: 24px; border-bottom: 3px solid #1a365d; margin-bottom: 24px; }
+    .header-left h1 { font-size: 22px; color: #1a365d; font-weight: 800; }
+    .header-left h1 span { color: #2b6cb0; }
+    .header-left p { font-size: 12px; color: #718096; margin-top: 2px; }
+    .header-right { text-align: right; }
+    .header-right .doc-label { font-size: 11px; color: #718096; text-transform: uppercase; letter-spacing: 0.5px; }
+    .header-right .doc-ref { font-size: 13px; color: #4a5568; margin-top: 2px; }
+    .title-bar { background: #1a365d; color: #fff; padding: 14px 24px; text-align: center; font-size: 16px; font-weight: 700; letter-spacing: 1px; margin-bottom: 24px; }
+    .section { margin-bottom: 24px; }
+    .section-title { font-size: 13px; font-weight: 700; color: #1a365d; text-transform: uppercase; letter-spacing: 0.5px; padding-bottom: 6px; border-bottom: 2px solid #ebf4ff; margin-bottom: 12px; }
+    .info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .info-item { padding: 8px 12px; background: #f7fafc; border-radius: 4px; }
+    .info-item .label { font-size: 11px; color: #718096; text-transform: uppercase; }
+    .info-item .value { font-size: 15px; font-weight: 600; color: #1a202c; margin-top: 2px; }
+    .info-item .value.highlight { color: #276749; font-size: 18px; }
+    .pool-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; margin-top: 8px; }
+    .pool-cell { text-align: center; padding: 8px; background: #f7fafc; border-radius: 4px; }
+    .pool-cell .label { font-size: 10px; color: #718096; }
+    .pool-cell .value { font-size: 14px; font-weight: 700; color: #2d3748; }
+    .calc-table { width: 100%; border-collapse: collapse; }
+    .calc-table td { padding: 8px 12px; border-bottom: 1px solid #f0f0f0; font-size: 14px; }
+    .bill-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+    .bill-table th { background: #f7fafc; color: #4a5568; font-weight: 600; text-align: left; padding: 6px 8px; border-bottom: 2px solid #e2e8f0; font-size: 10px; text-transform: uppercase; }
+    .bill-table td { padding: 5px 8px; border-bottom: 1px solid #f0f0f0; }
+    .bill-table tr:nth-child(even) { background: #fafafa; }
+    .total-row td { font-weight: 700; border-top: 2px solid #1a365d; background: #ebf4ff; }
+    .signature-section { margin-top: 48px; display: grid; grid-template-columns: 1fr 1fr; gap: 48px; }
+    .sig-box { text-align: center; }
+    .sig-line { border-top: 1px solid #cbd5e0; margin-top: 60px; padding-top: 8px; font-size: 12px; color: #718096; }
+    .footer { margin-top: 32px; padding-top: 16px; border-top: 1px solid #e2e8f0; text-align: center; font-size: 11px; color: #a0aec0; }
+    .no-print { margin: 20px auto; max-width: 900px; text-align: right; }
+    .btn { display: inline-flex; align-items: center; gap: 6px; padding: 10px 20px; border: none; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; text-decoration: none; }
+    .btn-primary { background: #2b6cb0; color: #fff; }
+    .btn-outline { background: transparent; border: 1px solid #cbd5e0; color: #4a5568; }
+    @media print {
+      body { background: #fff; }
+      .page { box-shadow: none; margin: 0; max-width: 100%; }
+      .page-inner { padding: 24px; }
+      .no-print { display: none !important; }
+      .bill-table { font-size: 9px; }
+      .bill-table th, .bill-table td { padding: 3px 4px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="no-print">
+    <a href="/settlements" class="btn btn-outline">&larr; Back to Settlements</a>
+    <button class="btn btn-primary" onclick="window.print()">Print / Save as PDF</button>
+  </div>
+  <div class="page">
+    <div class="page-inner">
+      <!-- LETTERHEAD -->
+      <div class="header">
+        <div class="header-left">
+          <h1>Health<span>1</span> Super Speciality Hospitals</h1>
+          <p>Near Shilaj Circle, Sardar Patel Ring Road, Ahmedabad, Gujarat — 380059</p>
+          <p>CIN: U85100GJ2016PTC091922 &nbsp;|&nbsp; www.health1hospitals.com</p>
+        </div>
+        <div class="header-right">
+          <div class="doc-label">Statement Reference</div>
+          <div class="doc-ref">MP-${settlement.id.toString().padStart(5, '0')}</div>
+          <div class="doc-label" style="margin-top:8px">Generated</div>
+          <div class="doc-ref">${new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}</div>
+        </div>
+      </div>
+
+      <div class="title-bar">PROFESSIONAL FEE PAYOUT STATEMENT</div>
+
+      <!-- DOCTOR & PERIOD -->
+      <div class="section">
+        <div class="info-grid">
+          <div class="info-item"><div class="label">Doctor</div><div class="value">${settlement.display_name || settlement.doctor_name}</div></div>
+          <div class="info-item"><div class="label">Period</div><div class="value">${monthLabel}</div></div>
+          <div class="info-item"><div class="label">Centre</div><div class="value">${settlement.centre}</div></div>
+          <div class="info-item"><div class="label">Contract Type</div><div class="value">${ctype}${ctype === 'MGM' ? ' (MGM: ' + fmtRs(contract.mgm_amount) + ')' : ''}</div></div>
+        </div>
+      </div>
+
+      <!-- POOL SUMMARY -->
+      <div class="section">
+        <div class="section-title">Professional Fee Pool — Payor Breakdown</div>
+        <div class="pool-grid">
+          <div class="pool-cell"><div class="label">CASH</div><div class="value">${fmtRs(cashPool)}</div></div>
+          <div class="pool-cell"><div class="label">TPA</div><div class="value">${fmtRs(tpaPool)}</div></div>
+          <div class="pool-cell"><div class="label">PMJAY</div><div class="value">${fmtRs(pmjayPool)}</div></div>
+          <div class="pool-cell"><div class="label">GOVT</div><div class="value">${fmtRs(govtPool)}</div></div>
+          <div class="pool-cell"><div class="label">OPD</div><div class="value">${fmtRs(opdPool)}</div></div>
+        </div>
+        <div class="info-grid" style="margin-top:8px">
+          <div class="info-item"><div class="label">Total Prof Fee Pool</div><div class="value" style="color:#2b6cb0;font-size:18px">${fmtRs(pool)}</div></div>
+          <div class="info-item"><div class="label">Total Bills (IP: ${ipCount} | OP: ${opCount})</div><div class="value">${bills.length} bills processed</div></div>
+        </div>
+      </div>
+
+      <!-- SETTLEMENT CALCULATION -->
+      <div class="section">
+        <div class="section-title">Settlement Calculation</div>
+        <table class="calc-table">
+          ${calcExplanation}
+        </table>
+      </div>
+
+      <!-- PAYMENT DETAILS -->
+      ${settlement.payment_utr ? `<div class="section">
+        <div class="section-title">Payment Details</div>
+        ${paymentHtml}
+      </div>` : ''}
+
+      <!-- BILL BREAKDOWN -->
+      <div class="section">
+        <div class="section-title">Bill-by-Bill Breakdown</div>
+        <table class="bill-table">
+          <thead>
+            <tr><th>#</th><th>Bill No</th><th>Date</th><th>Patient</th><th>Payor</th><th>Method</th><th style="text-align:right">Base</th><th style="text-align:center">Split</th><th style="text-align:right">Earning</th></tr>
+          </thead>
+          <tbody>
+            ${billRowsHtml}
+            <tr class="total-row">
+              <td colspan="6">TOTAL (${bills.length} bills)</td>
+              <td></td>
+              <td></td>
+              <td style="text-align:right;font-size:13px">${fmtRs(pool)}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- SIGNATURE -->
+      <div class="signature-section">
+        <div class="sig-box">
+          <div class="sig-line">For Health1 Super Speciality Hospitals</div>
+        </div>
+        <div class="sig-box">
+          <div class="sig-line">${settlement.display_name || settlement.doctor_name}</div>
+        </div>
+      </div>
+
+      <div class="footer">
+        <p>This is a system-generated statement from MedPay. For queries, contact the Finance Department at Health1 Hospitals.</p>
+        <p>Statement Ref: MP-${settlement.id.toString().padStart(5, '0')} &nbsp;|&nbsp; Generated: ${new Date().toISOString()}</p>
+      </div>
+    </div>
+  </div>
+</body>
+</html>`;
 }
 
 // ===================== MAIN ROUTER =====================
@@ -2174,6 +2514,9 @@ export default {
         html = await settlementsPage(env, url.searchParams);
       } else if (path === '/aliases') {
         html = await aliasesPage(env);
+      } else if (path.match(/^\/statement\/(\d+)$/)) {
+        const id = parseInt(path.match(/^\/statement\/(\d+)$/)[1]);
+        html = await statementPage(env, id);
       } else {
         html = htmlShell('Not Found', '', '<h1>404</h1><p>Page not found.</p><a href="/" class="btn btn-primary">Go to Dashboard</a>');
       }
