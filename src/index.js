@@ -371,7 +371,7 @@ async function toggleActive(id, val) {
 }
 
 // ===================== PAGE: Add/Edit Doctor (Questionnaire) =====================
-async function doctorFormPage(env, doctorId = null) {
+async function doctorFormPage(env, doctorId = null, prefillName = null) {
   let doc = null, contract = null, pkgs = [], existingAliases = [];
   if (doctorId) {
     doc = await env.DB.prepare('SELECT * FROM doctors WHERE id = ?').bind(doctorId).first();
@@ -401,7 +401,7 @@ async function doctorFormPage(env, doctorId = null) {
       <div class="form-section">
         <div class="form-section-title">Section 1 — Doctor Identity</div>
         <div class="form-row">
-          <div class="form-group"><label>Full Name (canonical) *</label><input type="text" id="f_name" value="${isEdit ? doc.name : ''}" required ${isEdit ? 'readonly style="background:#f7fafc"' : ''}></div>
+          <div class="form-group"><label>Full Name (canonical) *</label><input type="text" id="f_name" value="${isEdit ? doc.name : (prefillName || '')}" required ${isEdit ? 'readonly style="background:#f7fafc"' : ''}></div>
           <div class="form-group"><label>Display Name</label><input type="text" id="f_display_name" value="${v('display_name')}"></div>
           <div class="form-group"><label>Login PIN (4-digit)</label><input type="text" id="f_pin" value="${v('pin')}" maxlength="4" pattern="[0-9]{4}" inputmode="numeric"></div>
         </div>
@@ -585,6 +585,7 @@ async function doctorFormPage(env, doctorId = null) {
         <p style="font-size:13px;color:#718096;margin-bottom:12px">Enter the exact name(s) this doctor appears under in eCW CSV exports. One per row.</p>
         <div id="alias_container">
           ${existingAliases.map(a => `<div class="alias-row"><input type="text" class="alias-input" value="${a.alias}" style="flex:1;padding:8px 12px;border:1px solid #e2e8f0;border-radius:6px"><button type="button" class="btn btn-danger btn-sm" onclick="this.closest('.alias-row').remove()">✕</button></div>`).join('')}
+          ${!isEdit && prefillName ? `<div class="alias-row"><input type="text" class="alias-input" value="${prefillName}" style="flex:1;padding:8px 12px;border:1px solid #e2e8f0;border-radius:6px"><button type="button" class="btn btn-danger btn-sm" onclick="this.closest('.alias-row').remove()">✕</button></div>` : ''}
         </div>
         <button type="button" class="btn btn-outline btn-sm" onclick="addAliasRow()">+ Add Alias</button>
       </div>
@@ -1613,32 +1614,23 @@ function displayResults(results, pStats) {
     });
     var unknownList = Object.values(unknownDocs).sort(function(a, b) { return b.count - a.count; });
 
-    var docOptions = '<option value="">— Skip —</option><option value="__new__" style="color:#2b6cb0;font-weight:600">+ Create New Doctor</option>';
+    var docOptions = '<option value="">— Skip (not in system yet) —</option>';
     DOC_DATA.doctors.forEach(function(d) {
       docOptions += '<option value="' + d.id + '">' + (d.display_name || d.name) + '</option>';
     });
 
-    flagsHtml = '<p style="margin-bottom:12px;font-size:14px"><strong>' + unknownList.length + ' unknown doctor name(s)</strong> found in ' + allFlags.length + ' bills. Map to existing or create new.</p>';
+    flagsHtml = '<p style="margin-bottom:12px;font-size:14px"><strong>' + unknownList.length + ' unknown doctor name(s)</strong> found in ' + allFlags.length + ' bills.</p>';
+    flagsHtml += '<p style="margin-bottom:16px;font-size:13px;color:#4a5568">If this is an existing doctor under a different name, map them below. If this is a <strong>new doctor not yet onboarded</strong>, they must go through full onboarding at <a href="/doctors/add" target="_blank" style="color:#2b6cb0;font-weight:600">Doctors → Add Doctor</a> before their bills can be calculated.</p>';
     flagsHtml += '<div id="aliasMapRows">';
     unknownList.forEach(function(u, i) {
+      var encodedName = encodeURIComponent(u.name);
       flagsHtml += '<div class="alias-map-row" style="margin-bottom:8px;padding:8px 12px;background:#f7fafc;border-radius:6px" data-idx="' + i + '">' +
-        '<div style="display:grid;grid-template-columns:1fr 1fr 60px;gap:8px;align-items:center">' +
+        '<div style="display:grid;grid-template-columns:1fr 1fr auto 60px;gap:8px;align-items:center">' +
         '<div><strong>' + u.name + '</strong><span style="color:#a0aec0;font-size:12px;margin-left:8px">(' + u.count + ' bills)</span></div>' +
-        '<select class="alias-map-select" data-ecw-name="' + u.name.replace(/"/g, '&quot;') + '" onchange="onAliasDdChange(this,' + i + ')" style="padding:8px;border:1px solid #e2e8f0;border-radius:6px">' + docOptions + '</select>' +
+        '<select class="alias-map-select" data-ecw-name="' + u.name.replace(/"/g, '&quot;') + '" style="padding:8px;border:1px solid #e2e8f0;border-radius:6px">' + docOptions + '</select>' +
+        '<a href="/doctors/add?prefill=' + encodedName + '" target="_blank" class="btn btn-outline btn-sm" style="white-space:nowrap" title="Open full onboarding form with name pre-filled">Onboard New</a>' +
         '<span class="alias-map-status" style="font-size:12px;color:#a0aec0">—</span>' +
-        '</div>' +
-        '<div id="quickAdd_' + i + '" class="hidden" style="margin-top:8px;padding:12px;background:#ebf4ff;border-radius:6px">' +
-          '<div style="font-size:12px;font-weight:600;color:#1a365d;margin-bottom:8px">Quick Add Doctor</div>' +
-          '<div class="form-row" style="gap:8px">' +
-            '<div class="form-group" style="margin:0"><label style="font-size:11px">Name (pre-filled)</label><input type="text" class="qa-name" value="' + u.name.replace(/"/g, '&quot;') + '" style="padding:6px 8px;font-size:13px"></div>' +
-            '<div class="form-group" style="margin:0"><label style="font-size:11px">Contract Type</label><select class="qa-ctype" style="padding:6px 8px;font-size:13px"><option value="FFS">FFS</option><option value="MGM">MGM</option><option value="Retainer">Retainer</option><option value="Salary">Salary</option><option value="Throughput">Throughput</option></select></div>' +
-            '<div class="form-group" style="margin:0"><label style="font-size:11px">Cash/TPA Method</label><select class="qa-method" style="padding:6px 8px;font-size:13px"><option value="A">A — Doctor Amt</option><option value="B">B — Net minus Rad/Path/Pharma</option><option value="na">na</option></select></div>' +
-            '<div class="form-group" style="margin:0"><label style="font-size:11px">Self %</label><input type="number" class="qa-self" value="100" style="padding:6px 8px;font-size:13px;width:70px"></div>' +
-            '<div class="form-group" style="margin:0"><label style="font-size:11px">Other %</label><input type="number" class="qa-other" value="80" style="padding:6px 8px;font-size:13px;width:70px"></div>' +
-          '</div>' +
-          '<div style="margin-top:8px;text-align:right"><button class="btn btn-primary btn-sm" onclick="quickAddDoctor(' + i + ')">Create & Map</button></div>' +
-        '</div>' +
-        '</div>';
+        '</div></div>';
     });
     flagsHtml += '</div>';
     flagsHtml += '<div style="margin-top:16px;display:flex;gap:8px"><button class="btn btn-primary" onclick="saveAliasesAndReprocess()">Save Aliases & Re-process</button><button class="btn btn-outline" onclick="saveAliasesOnly()">Save Aliases Only</button></div>';
@@ -1969,108 +1961,31 @@ function recalcDoctor(docIdx) {
 }
 
 // ============ AUTO-ALIAS FROM FLAGS ============
-function onAliasDdChange(sel, idx) {
-  var panel = document.getElementById('quickAdd_' + idx);
-  if (sel.value === '__new__') {
-    panel.classList.remove('hidden');
-  } else {
-    panel.classList.add('hidden');
-  }
-}
-
-async function quickAddDoctor(idx) {
-  var row = document.querySelector('.alias-map-row[data-idx="' + idx + '"]');
-  var sel = row.querySelector('.alias-map-select');
-  var ecwName = sel.getAttribute('data-ecw-name');
-  var panel = document.getElementById('quickAdd_' + idx);
-  var name = panel.querySelector('.qa-name').value.trim();
-  var ctype = panel.querySelector('.qa-ctype').value;
-  var method = panel.querySelector('.qa-method').value;
-  var selfPct = parseFloat(panel.querySelector('.qa-self').value) || 100;
-  var otherPct = parseFloat(panel.querySelector('.qa-other').value) || 80;
-
-  if (!name) { alert('Doctor name is required'); return; }
-
-  var payload = {
-    doctor: { name: name, display_name: name, pin: null },
-    contract: {
-      contract_type: ctype,
-      mgm_amount: null, threshold_amount: null, incentive_pct: null, retainer_pool_pct: null,
-      cash_base_method: method, cash_b_pct: null, cash_self_pct: selfPct, cash_other_pct: otherPct,
-      tpa_base_method: method, tpa_b_pct: null, tpa_self_pct: selfPct, tpa_other_pct: otherPct,
-      pmjay_base_method: 'na', pmjay_pct: null, pmjay_in_mgm_pool: 0,
-      govt_base_method: method, govt_b_pct: null, govt_self_pct: 100, govt_other_pct: 100,
-      opd_non_govt_pct: selfPct, opd_govt_pct: 100,
-      tds_rate: 10, rb_hospital_fixed: null, rb_includes_robotic: 0,
-      notes: 'Quick-added from calculator flags', effective_date: null
-    },
-    packages: [],
-    aliases: [ecwName],
-    centres: []
-  };
-
-  try {
-    var r = await fetch('/api/doctors', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
-    if (r.ok) {
-      var result = await r.json();
-      var newId = result.id;
-      // Add to local data so re-process works
-      DOC_DATA.doctors.push({ id: newId, name: name, display_name: name, active: 1 });
-      DOC_DATA.contractMap[newId] = payload.contract;
-      var norm = ecwName.toLowerCase().replace(/\\./g, '').replace(/\\s+/g, ' ').trim().replace(/\\s*health\\s*one\\s*team$/i, '').replace(/\\s*healthone\\s*team$/i, '').replace(/\\s*healthone$/i, '').replace(/\\s*health\\s*one$/i, '').trim();
-      DOC_DATA.aliasMap[norm] = newId;
-
-      // Update dropdown to show the new doctor selected
-      var newOption = document.createElement('option');
-      newOption.value = newId;
-      newOption.textContent = name;
-      sel.insertBefore(newOption, sel.querySelector('option:nth-child(3)'));
-      sel.value = newId;
-      panel.classList.add('hidden');
-
-      var statusEl = row.querySelector('.alias-map-status');
-      statusEl.textContent = '\\u2713 Created #' + newId;
-      statusEl.style.color = '#276749';
-    } else {
-      var err = await r.text();
-      alert('Error creating doctor: ' + err);
-    }
-  } catch(ex) {
-    alert('Network error: ' + ex.message);
-  }
-}
-
 async function saveAliasesOnly() {
   var selects = document.querySelectorAll('.alias-map-select');
-  var saved = 0, errors = 0, skipped = 0;
+  var saved = 0, errors = 0;
   for (var i = 0; i < selects.length; i++) {
     var sel = selects[i];
     var docId = sel.value;
     var ecwName = sel.getAttribute('data-ecw-name');
     var row = sel.closest('.alias-map-row');
-    var statusEl = row ? row.querySelector('.alias-map-status') : sel.parentElement.querySelector('.alias-map-status');
-    // Skip empty, __new__ (handled by quickAdd), and already-created
-    if (!docId || docId === '__new__') { if (statusEl && statusEl.textContent.indexOf('Created') < 0) { statusEl.textContent = 'Skipped'; statusEl.style.color = '#a0aec0'; } skipped++; continue; }
-    // Skip if already saved in this round (quick-add sets status to Created)
-    if (statusEl && statusEl.textContent.indexOf('Created') >= 0) { skipped++; continue; }
+    var statusEl = row ? row.querySelector('.alias-map-status') : null;
+    if (!docId) { if (statusEl) { statusEl.textContent = 'Not mapped'; statusEl.style.color = '#ed8936'; } continue; }
     try {
       var r = await fetch('/api/aliases', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ alias: ecwName, doctor_id: parseInt(docId) }) });
       if (r.ok) {
         saved++;
-        statusEl.textContent = '\\u2713 Saved';
-        statusEl.style.color = '#276749';
+        if (statusEl) { statusEl.textContent = '\\u2713 Saved'; statusEl.style.color = '#276749'; }
         var norm = ecwName.toLowerCase().replace(/\\./g, '').replace(/\\s+/g, ' ').trim().replace(/\\s*health\\s*one\\s*team$/i, '').replace(/\\s*healthone\\s*team$/i, '').replace(/\\s*healthone$/i, '').replace(/\\s*health\\s*one$/i, '').trim();
         DOC_DATA.aliasMap[norm] = parseInt(docId);
       } else {
         errors++;
         var errText = await r.text();
-        statusEl.textContent = '\\u2717 ' + (errText.indexOf('duplicate') >= 0 ? 'Exists' : 'Error');
-        statusEl.style.color = errText.indexOf('duplicate') >= 0 ? '#ed8936' : '#c53030';
+        if (statusEl) { statusEl.textContent = '\\u2717 ' + (errText.indexOf('duplicate') >= 0 ? 'Exists' : 'Error'); statusEl.style.color = errText.indexOf('duplicate') >= 0 ? '#ed8936' : '#c53030'; }
       }
     } catch(ex) {
       errors++;
-      statusEl.textContent = '\\u2717 Failed';
-      statusEl.style.color = '#c53030';
+      if (statusEl) { statusEl.textContent = '\\u2717 Failed'; statusEl.style.color = '#c53030'; }
     }
   }
   toast(saved + ' alias(es) saved' + (errors > 0 ? ', ' + errors + ' error(s)' : ''));
@@ -3776,7 +3691,7 @@ export default {
       } else if (path === '/doctors') {
         html = await doctorsListPage(env);
       } else if (path === '/doctors/add') {
-        html = await doctorFormPage(env);
+        html = await doctorFormPage(env, null, url.searchParams.get('prefill'));
       } else if (path === '/doctors/import') {
         html = await bulkImportPage(env);
       } else if (path.match(/^\/doctors\/edit\/(\d+)$/)) {
