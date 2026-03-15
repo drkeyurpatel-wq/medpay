@@ -1485,7 +1485,11 @@ function displayResults(results) {
       '</div>' +
       '<div class="collapsible-content" id="collapse_' + idx + '">' +
         buildPoolSummary(r) +
-        buildBillTable(r.billResults) +
+        '<div style="margin-bottom:12px;display:flex;gap:8px;align-items:center">' +
+          '<button class="btn btn-outline btn-sm" onclick="overrideSettlement(' + idx + ')" title="Override gross payout">\\u270E Override Payout</button>' +
+          (r.settlement.overridePayout != null ? '<span style="font-size:12px;color:#6b46c1">Payout overridden to ' + fmtRs(r.settlement.overridePayout) + (r.settlement.overrideReason ? ' — ' + r.settlement.overrideReason : '') + '</span>' : '') +
+        '</div>' +
+        buildBillTable(r.billResults, idx) +
         (r.billFlags.length > 0 ? '<div class="flag-card card" style="margin-top:12px"><h3 style="color:#c53030">Flagged Bills (' + r.billFlags.length + ')</h3>' + buildFlagTable(r.billFlags) + '</div>' : '') +
       '</div>' +
     '</div>';
@@ -1581,12 +1585,30 @@ function toggleCollapse(idx) {
   if (el) el.classList.toggle('open');
 }
 
-function buildBillTable(billResults) {
-  var h = '<table style="font-size:13px"><thead><tr><th>Bill No</th><th>Date</th><th>Patient</th><th>Centre</th><th>Ref Doctor</th><th>Payor</th><th>Method</th><th>Base</th><th>Split</th><th>Earning</th></tr></thead><tbody>';
-  billResults.forEach(function(br) {
-    var flagStyle = br.flagged ? ' style="background:#fff5f5"' : '';
-    h += '<tr' + flagStyle + '><td>' + br.bill.billNo + '</td><td>' + fmtDate(br.bill.billDate) + '</td><td>' + br.bill.patientName + '</td><td><span class="badge badge-active" style="font-size:11px">' + (br.centre || '—') + '</span></td><td>' + (br.bill.refDoctor || '—') + '</td><td>' + br.payor + (br.bill.sponsor ? ' (' + br.bill.sponsor.substring(0,20) + ')' : '') + '</td><td>' + br.baseMethod + (br.pkgOverride ? ' <span class="flag-badge" style="background:#ebf4ff;color:#2b6cb0">PKG</span>' : '') + '</td><td>' + fmtRs(br.baseAmount) + '</td><td>' + br.splitPct + '%' + (br.selfRef ? ' (self)' : '') + '</td><td style="font-weight:600">' + fmtRs(br.earning) + '</td></tr>';
-    if (br.flagged) h += '<tr style="background:#fff5f5"><td colspan="10" style="color:#c53030;font-size:12px">\\u26A0 ' + br.flagReason + '</td></tr>';
+function buildBillTable(billResults, docIdx) {
+  var h = '<table style="font-size:13px" id="billTable_' + docIdx + '"><thead><tr><th style="width:30px">Inc.</th><th>Bill No</th><th>Date</th><th>Patient</th><th>Centre</th><th>Payor</th><th>Method</th><th>Split</th><th style="text-align:right">Earning</th><th style="width:40px"></th></tr></thead><tbody>';
+  billResults.forEach(function(br, bIdx) {
+    var isExcluded = br.excluded;
+    var isOverridden = br.originalEarning != null && br.originalEarning !== br.earning;
+    var rowStyle = isExcluded ? ' style="opacity:0.4;text-decoration:line-through;background:#f7fafc"' : (br.flagged ? ' style="background:#fff5f5"' : (isOverridden ? ' style="background:#fffff0"' : ''));
+    var earningDisplay = fmtRs(br.earning);
+    if (isOverridden && !isExcluded) {
+      earningDisplay = '<span style="text-decoration:line-through;color:#a0aec0;font-size:11px">' + fmtRs(br.originalEarning) + '</span> ' + fmtRs(br.earning);
+    }
+    h += '<tr' + rowStyle + '>' +
+      '<td><input type="checkbox" ' + (isExcluded ? '' : 'checked') + ' onchange="toggleExclude(' + docIdx + ',' + bIdx + ',this.checked)" title="Include in pool"></td>' +
+      '<td>' + br.bill.billNo + '</td>' +
+      '<td>' + fmtDate(br.bill.billDate) + '</td>' +
+      '<td>' + br.bill.patientName + '</td>' +
+      '<td><span class="badge badge-active" style="font-size:11px">' + (br.centre || '') + '</span></td>' +
+      '<td>' + br.payor + '</td>' +
+      '<td>' + br.baseMethod + (br.pkgOverride ? ' <span class="flag-badge" style="background:#ebf4ff;color:#2b6cb0">PKG</span>' : '') + '</td>' +
+      '<td>' + br.splitPct + '%' + (br.selfRef ? '(S)' : '') + '</td>' +
+      '<td style="text-align:right;font-weight:600">' + earningDisplay + '</td>' +
+      '<td><button class="btn btn-outline btn-sm" style="padding:2px 6px;font-size:11px" onclick="editBillEarning(' + docIdx + ',' + bIdx + ')" title="Override earning">\\u270E</button></td>' +
+      '</tr>';
+    if (br.overrideReason) h += '<tr' + (isExcluded ? ' style="opacity:0.4"' : '') + '><td colspan="10" style="font-size:11px;color:#6b46c1;padding:2px 8px">Override: ' + br.overrideReason + '</td></tr>';
+    if (br.flagged && !isExcluded) h += '<tr style="background:#fff5f5"><td colspan="10" style="color:#c53030;font-size:12px">\\u26A0 ' + br.flagReason + '</td></tr>';
   });
   h += '</tbody></table>';
   return h;
@@ -1700,6 +1722,100 @@ function exportResultsCSV() {
   a.click();
 }
 
+// ============ BILL & SETTLEMENT OVERRIDES ============
+function editBillEarning(docIdx, billIdx) {
+  var br = calcResults[docIdx].billResults[billIdx];
+  var current = br.earning;
+  var newVal = prompt('Override earning for ' + br.bill.billNo + ' (' + br.bill.patientName + ')\\nCurrent: Rs. ' + Math.round(current) + '\\n\\nEnter new earning (Rs.):', Math.round(current));
+  if (newVal === null) return;
+  newVal = parseFloat(newVal);
+  if (isNaN(newVal)) { alert('Invalid number'); return; }
+  var reason = prompt('Reason for override (required):', br.overrideReason || '');
+  if (!reason || !reason.trim()) { alert('Override reason is required'); return; }
+  // Store original if first override
+  if (br.originalEarning == null) br.originalEarning = current;
+  br.earning = newVal;
+  br.overrideReason = reason.trim();
+  recalcDoctor(docIdx);
+}
+
+function toggleExclude(docIdx, billIdx, included) {
+  var br = calcResults[docIdx].billResults[billIdx];
+  if (!included) {
+    var reason = prompt('Reason for excluding this bill:', br.overrideReason || '');
+    if (!reason || !reason.trim()) { alert('Reason required to exclude a bill'); return; }
+    br.excluded = true;
+    br.overrideReason = reason.trim();
+    if (br.originalEarning == null) br.originalEarning = br.earning;
+  } else {
+    br.excluded = false;
+  }
+  recalcDoctor(docIdx);
+}
+
+function overrideSettlement(docIdx) {
+  var r = calcResults[docIdx];
+  var s = r.settlement;
+  var current = s.overridePayout != null ? s.overridePayout : s.payout;
+  var newVal = prompt('Override gross payout for ' + (r.doctor ? r.doctor.display_name || r.doctor.name : 'Doctor') + '\\nCalculated: Rs. ' + Math.round(s.payout) + '\\n\\nEnter new gross payout (Rs.), or leave blank to remove override:', s.overridePayout != null ? Math.round(s.overridePayout) : '');
+  if (newVal === null) return;
+  if (newVal.trim() === '') {
+    // Remove override
+    s.overridePayout = null;
+    s.overrideReason = null;
+  } else {
+    newVal = parseFloat(newVal);
+    if (isNaN(newVal)) { alert('Invalid number'); return; }
+    var reason = prompt('Reason for payout override (required):', s.overrideReason || '');
+    if (!reason || !reason.trim()) { alert('Override reason is required'); return; }
+    s.overridePayout = newVal;
+    s.overrideReason = reason.trim();
+  }
+  recalcDoctor(docIdx);
+}
+
+function recalcDoctor(docIdx) {
+  var r = calcResults[docIdx];
+  var contract = r.contract;
+  // Recalculate pool from non-excluded bills
+  var pool = 0, pmjayPool = 0;
+  var payorBreakdown = { CASH: 0, TPA: 0, PMJAY: 0, Govt: 0, OPD: 0 };
+  r.billResults.forEach(function(br) {
+    if (br.excluded) return;
+    pool += br.earning;
+    if (br.payor === 'PMJAY') pmjayPool += br.earning;
+    if (br.baseMethod && br.baseMethod.indexOf('OPD') === 0) payorBreakdown.OPD += br.earning;
+    else payorBreakdown[br.payor] = (payorBreakdown[br.payor] || 0) + br.earning;
+  });
+  r.payorBreakdown = payorBreakdown;
+
+  // Recalculate settlement
+  var newSettlement = calcSettlement(r.docId, r.billResults.filter(function(b) { return !b.excluded; }), contract);
+  // Preserve overrides
+  var overridePayout = r.settlement.overridePayout;
+  var overrideReason = r.settlement.overrideReason;
+  r.settlement = newSettlement;
+  if (overridePayout != null) {
+    r.settlement.overridePayout = overridePayout;
+    r.settlement.overrideReason = overrideReason;
+    r.settlement.payout = overridePayout;
+    r.settlement.tdsAmount = overridePayout * (r.settlement.tdsRate / 100);
+    r.settlement.netPayout = overridePayout - r.settlement.tdsAmount;
+  }
+
+  // Re-render — preserve which cards are open
+  var openCards = {};
+  document.querySelectorAll('.collapsible-content.open').forEach(function(el) {
+    openCards[el.id] = true;
+  });
+  displayResults(calcResults);
+  // Restore open state
+  Object.keys(openCards).forEach(function(id) {
+    var el = document.getElementById(id);
+    if (el) el.classList.add('open');
+  });
+}
+
 // ============ AUTO-ALIAS FROM FLAGS ============
 async function saveAliasesOnly() {
   var selects = document.querySelectorAll('.alias-map-select');
@@ -1768,6 +1884,8 @@ async function saveSettlements() {
       incentive_amount: r.settlement.incentiveAmount,
       tds_amount: r.settlement.tdsAmount,
       net_payout: r.settlement.netPayout,
+      override_payout: r.settlement.overridePayout || null,
+      override_reason: r.settlement.overrideReason || null,
       bills: r.billResults.map(function(br) {
         return {
           bill_no: br.bill.billNo,
@@ -1781,6 +1899,10 @@ async function saveSettlements() {
           self_ref: br.selfRef ? 1 : 0,
           split_pct: br.splitPct,
           doctor_earning: br.earning,
+          original_earning: br.originalEarning || null,
+          override_earning: (br.originalEarning != null && br.originalEarning !== br.earning) ? br.earning : null,
+          override_reason: br.overrideReason || null,
+          excluded: br.excluded ? 1 : 0,
           pkg_override: br.pkgOverride ? 1 : 0,
           pkg_name: br.pkgName,
           centre: br.centre || primaryCentre,
@@ -2439,14 +2561,14 @@ async function handleApi(request, env, path) {
     if (!json || !Array.isArray(json)) return new Response('Expected array', { status: 400 });
     try {
       for (const s of json) {
-        const res = await env.DB.prepare(`INSERT INTO monthly_settlements (doctor_id, month, centre, calculated_pool, pmjay_pool, final_payout, mgm_triggered, incentive_triggered, incentive_amount, tds_amount, net_payout) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
-          s.doctor_id, s.month, s.centre, s.calculated_pool, s.pmjay_pool, s.final_payout, s.mgm_triggered, s.incentive_triggered, s.incentive_amount, s.tds_amount || 0, s.net_payout || s.final_payout
+        const res = await env.DB.prepare(`INSERT INTO monthly_settlements (doctor_id, month, centre, calculated_pool, pmjay_pool, final_payout, mgm_triggered, incentive_triggered, incentive_amount, tds_amount, net_payout, override_payout, override_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
+          s.doctor_id, s.month, s.centre, s.calculated_pool, s.pmjay_pool, s.final_payout, s.mgm_triggered, s.incentive_triggered, s.incentive_amount, s.tds_amount || 0, s.net_payout || s.final_payout, s.override_payout || null, s.override_reason || null
         ).run();
         const settlementId = res.meta.last_row_id;
 
         for (const b of (s.bills || [])) {
-          await env.DB.prepare(`INSERT INTO bill_calculations (settlement_id, bill_no, patient_name, consulting_doctor, referring_doctor, payor_type, payor_raw, base_method, base_amount, self_ref, split_pct, doctor_earning, pkg_override, pkg_name, centre, bill_date, flagged, flag_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
-            settlementId, b.bill_no, b.patient_name, b.consulting_doctor, b.referring_doctor, b.payor_type, b.payor_raw, b.base_method, b.base_amount, b.self_ref, b.split_pct, b.doctor_earning, b.pkg_override, b.pkg_name, b.centre, b.bill_date, b.flagged, b.flag_reason
+          await env.DB.prepare(`INSERT INTO bill_calculations (settlement_id, bill_no, patient_name, consulting_doctor, referring_doctor, payor_type, payor_raw, base_method, base_amount, self_ref, split_pct, doctor_earning, original_earning, override_earning, override_reason, excluded, pkg_override, pkg_name, centre, bill_date, flagged, flag_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
+            settlementId, b.bill_no, b.patient_name, b.consulting_doctor, b.referring_doctor, b.payor_type, b.payor_raw, b.base_method, b.base_amount, b.self_ref, b.split_pct, b.doctor_earning, b.original_earning || null, b.override_earning || null, b.override_reason || null, b.excluded || 0, b.pkg_override, b.pkg_name, b.centre, b.bill_date, b.flagged, b.flag_reason
           ).run();
         }
       }
@@ -2674,19 +2796,27 @@ async function statementPage(env, settlementId) {
   for (const b of bills) {
     const amt = b.doctor_earning || 0;
     const isOPD = (b.base_method || '').indexOf('OPD') === 0;
+    const isExcluded = b.excluded === 1;
     if (isOPD) {
-      opdTotal += amt; opdCount++; opdPool += amt;
+      if (!isExcluded) { opdTotal += amt; opdPool += amt; }
+      opdCount++;
     } else {
       const key = b.bill_no || ('row-' + b.id);
       if (!ipdMap[key]) {
-        ipdMap[key] = { bill_no: b.bill_no, bill_date: b.bill_date, patient_name: b.patient_name, payor_type: b.payor_type, payor_raw: b.payor_raw, base_method: b.base_method, earning: 0, self_ref: b.self_ref, split_pct: b.split_pct };
+        ipdMap[key] = { bill_no: b.bill_no, bill_date: b.bill_date, patient_name: b.patient_name, payor_type: b.payor_type, payor_raw: b.payor_raw, base_method: b.base_method, earning: 0, original_earning: null, override_reason: b.override_reason, excluded: b.excluded, self_ref: b.self_ref, split_pct: b.split_pct };
       }
       ipdMap[key].earning += amt;
-      if (b.payor_type === 'CASH') cashPool += amt;
-      else if (b.payor_type === 'TPA') tpaPool += amt;
-      else if (b.payor_type === 'PMJAY') pmjayPool += amt;
-      else if (b.payor_type === 'Govt') govtPool += amt;
-      else cashPool += amt;
+      if (b.original_earning != null) {
+        if (ipdMap[key].original_earning == null) ipdMap[key].original_earning = 0;
+        ipdMap[key].original_earning += b.original_earning;
+      }
+      if (!isExcluded) {
+        if (b.payor_type === 'CASH') cashPool += amt;
+        else if (b.payor_type === 'TPA') tpaPool += amt;
+        else if (b.payor_type === 'PMJAY') pmjayPool += amt;
+        else if (b.payor_type === 'Govt') govtPool += amt;
+        else cashPool += amt;
+      }
     }
   }
   const ipdRows = Object.values(ipdMap);
@@ -2702,11 +2832,21 @@ async function statementPage(env, settlementId) {
   const tdsAmt = settlement.tds_amount || (payout * tdsRate / 100);
   const netPayout = settlement.net_payout || (payout - tdsAmt);
 
-  // IPD bill rows
+  // IPD bill rows — show overrides and exclusions
   let ipdRowsHtml = '';
   let sno = 1;
+  let excludedCount = 0;
   for (const r of ipdRows) {
-    ipdRowsHtml += `<tr><td>${sno++}</td><td>${r.bill_no || ''}</td><td>${r.bill_date || ''}</td><td>${r.patient_name || ''}</td><td>${r.payor_type || ''}${r.payor_raw ? ' (' + (r.payor_raw || '').substring(0, 20) + ')' : ''}</td><td style="text-align:right;font-weight:600">${fmtRs(r.earning)}</td></tr>`;
+    if (r.excluded) {
+      excludedCount++;
+      ipdRowsHtml += `<tr style="opacity:0.4;text-decoration:line-through"><td>${sno++}</td><td>${r.bill_no || ''}</td><td>${r.bill_date || ''}</td><td>${r.patient_name || ''}</td><td>${r.payor_type || ''}</td><td style="text-align:right">${fmtRs(r.earning)}</td></tr>`;
+      if (r.override_reason) ipdRowsHtml += `<tr style="opacity:0.5"><td colspan="6" style="font-size:10px;color:#6b46c1;padding:1px 8px">Excluded: ${r.override_reason}</td></tr>`;
+    } else {
+      const hasOverride = r.original_earning != null && r.original_earning !== r.earning;
+      const earningCell = hasOverride ? `<span style="text-decoration:line-through;color:#a0aec0;font-size:10px">${fmtRs(r.original_earning)}</span> ${fmtRs(r.earning)}` : fmtRs(r.earning);
+      ipdRowsHtml += `<tr><td>${sno++}</td><td>${r.bill_no || ''}</td><td>${r.bill_date || ''}</td><td>${r.patient_name || ''}</td><td>${r.payor_type || ''}${r.payor_raw ? ' (' + (r.payor_raw || '').substring(0, 20) + ')' : ''}</td><td style="text-align:right;font-weight:600">${earningCell}</td></tr>`;
+      if (hasOverride && r.override_reason) ipdRowsHtml += `<tr><td colspan="6" style="font-size:10px;color:#6b46c1;padding:1px 8px">Override: ${r.override_reason}</td></tr>`;
+    }
   }
 
   // Settlement calc
@@ -2732,8 +2872,17 @@ async function statementPage(env, settlementId) {
     calcRows = `<tr><td>Professional Fee Pool (from bills)</td><td style="text-align:right">${fmtRs(pool)}</td></tr>
       <tr style="font-weight:700"><td>Gross Payout</td><td style="text-align:right">${fmtRs(payout)}</td></tr>`;
   }
+  // Settlement override
+  let effectivePayout = payout;
+  if (settlement.override_payout != null) {
+    calcRows += `<tr style="color:#6b46c1"><td>Manual Override${settlement.override_reason ? ' — ' + settlement.override_reason : ''}</td><td style="text-align:right;font-weight:700">${fmtRs(settlement.override_payout)}</td></tr>`;
+    effectivePayout = settlement.override_payout;
+  }
+  const effectiveTds = effectivePayout * tdsRate / 100;
+  const effectiveNet = effectivePayout - effectiveTds;
+
   // TDS rows always
-  calcRows += `<tr style="color:#c53030"><td>Less: TDS @ ${tdsRate}%</td><td style="text-align:right">- ${fmtRs(tdsAmt)}</td></tr>`;
+  calcRows += `<tr style="color:#c53030"><td>Less: TDS @ ${tdsRate}%</td><td style="text-align:right">- ${fmtRs(effectiveTds)}</td></tr>`;
   // Adjustments
   if (adjustments.length > 0) {
     for (const adj of adjustments) {
@@ -2741,7 +2890,7 @@ async function statementPage(env, settlementId) {
       calcRows += `<tr style="color:${isNeg ? '#c53030' : '#276749'}"><td>${isNeg ? 'Less' : 'Add'}: ${adj.type}${adj.description ? ' — ' + adj.description : ''}</td><td style="text-align:right">${isNeg ? '- ' : '+ '}${fmtRs(Math.abs(adj.amount))}</td></tr>`;
     }
   }
-  const finalNet = netPayout + totalAdj;
+  const finalNet = effectiveNet + totalAdj;
   calcRows += `<tr style="font-weight:700;font-size:16px;background:#ebf4ff"><td>Net Payable</td><td style="text-align:right;color:#276749">${fmtRs(finalNet)}</td></tr>`;
 
   return `<!DOCTYPE html>
@@ -2861,9 +3010,10 @@ async function statementPage(env, settlementId) {
           <tr><td>Payment Date</td><td>${settlement.payment_date || '—'}</td></tr>
           <tr><td>Payment Mode</td><td>${settlement.payment_mode || '—'}</td></tr>
           <tr><td>Bank</td><td>${settlement.payment_bank || '—'}</td></tr>
-          <tr><td>Gross Amount</td><td>${fmtRs(payout)}</td></tr>
-          <tr><td>TDS Deducted (${tdsRate}%)</td><td style="color:#c53030">- ${fmtRs(tdsAmt)}</td></tr>
-          <tr><td style="font-weight:700">Net Amount Paid</td><td style="font-weight:700;font-size:16px;color:#276749">${fmtRs(netPayout + totalAdj)}</td></tr>
+          <tr><td>Gross Amount</td><td>${fmtRs(effectivePayout)}</td></tr>
+          <tr><td>TDS Deducted (${tdsRate}%)</td><td style="color:#c53030">- ${fmtRs(effectiveTds)}</td></tr>
+          ${totalAdj !== 0 ? '<tr><td>Adjustments</td><td style="color:' + (totalAdj < 0 ? '#c53030' : '#276749') + '">' + (totalAdj > 0 ? '+ ' : '- ') + fmtRs(Math.abs(totalAdj)) + '</td></tr>' : ''}
+          <tr><td style="font-weight:700">Net Amount Paid</td><td style="font-weight:700;font-size:16px;color:#276749">${fmtRs(finalNet)}</td></tr>
         </table>
       </div>` : ''}
 

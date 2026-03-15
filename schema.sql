@@ -78,6 +78,8 @@ CREATE TABLE IF NOT EXISTS monthly_settlements (
   payment_bank TEXT,
   payment_mode TEXT,
   payment_amount REAL,
+  override_payout REAL,
+  override_reason TEXT,
   created_at TEXT DEFAULT (datetime('now'))
 );
 
@@ -101,7 +103,11 @@ CREATE TABLE IF NOT EXISTS bill_calculations (
   centre TEXT,
   bill_date TEXT,
   flagged INTEGER DEFAULT 0,
-  flag_reason TEXT
+  flag_reason TEXT,
+  override_earning REAL,
+  override_reason TEXT,
+  excluded INTEGER DEFAULT 0,
+  original_earning REAL
 );
 
 -- Adjustments / deductions / advances per doctor per month
