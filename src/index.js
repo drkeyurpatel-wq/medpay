@@ -287,6 +287,7 @@ async function doctorsListPage(env) {
       <td><span class="badge ${doc.active ? 'badge-active' : 'badge-inactive'}">${doc.active ? 'Active' : 'Inactive'}</span></td>
       <td>
         <div class="btn-group">
+          <a href="/doctors/ledger/${doc.id}" class="btn btn-sm" style="background:#ebf4ff;color:#2b6cb0">Ledger</a>
           <a href="/doctors/edit/${doc.id}" class="btn btn-outline btn-sm">Edit</a>
           <button class="btn btn-sm ${doc.active ? 'btn-danger' : 'btn-success'}" onclick="toggleActive(${doc.id}, ${doc.active ? 0 : 1})">${doc.active ? 'Deactivate' : 'Activate'}</button>
         </div>
@@ -1511,9 +1512,22 @@ function displayResults(results, pStats) {
       '</div>' +
       '<div class="collapsible-content" id="collapse_' + idx + '">' +
         buildPoolSummary(r) +
-        '<div style="margin-bottom:12px;display:flex;gap:8px;align-items:center">' +
+        '<div style="margin-bottom:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
           '<button class="btn btn-outline btn-sm" onclick="overrideSettlement(' + idx + ')" title="Override gross payout">\\u270E Override Payout</button>' +
+          '<button class="btn btn-outline btn-sm" onclick="toggleManualBill(' + idx + ')" title="Add a bill manually">+ Add Bill</button>' +
           (r.settlement.overridePayout != null ? '<span style="font-size:12px;color:#6b46c1">Payout overridden to ' + fmtRs(r.settlement.overridePayout) + (r.settlement.overrideReason ? ' — ' + r.settlement.overrideReason : '') + '</span>' : '') +
+        '</div>' +
+        '<div id="manualBillForm_' + idx + '" class="hidden" style="margin-bottom:16px;padding:16px;background:#f7fafc;border:1px solid #e2e8f0;border-radius:8px">' +
+          '<div style="font-size:13px;font-weight:600;color:#1a365d;margin-bottom:8px">Add Manual Bill</div>' +
+          '<div class="form-row" style="gap:8px">' +
+            '<div class="form-group" style="margin:0"><label style="font-size:11px">Bill No</label><input type="text" id="mb_billno_' + idx + '" placeholder="MANUAL-001" style="padding:6px 8px;font-size:13px"></div>' +
+            '<div class="form-group" style="margin:0"><label style="font-size:11px">Date</label><input type="date" id="mb_date_' + idx + '" style="padding:6px 8px;font-size:13px"></div>' +
+            '<div class="form-group" style="margin:0"><label style="font-size:11px">Patient</label><input type="text" id="mb_patient_' + idx + '" style="padding:6px 8px;font-size:13px"></div>' +
+            '<div class="form-group" style="margin:0"><label style="font-size:11px">Sponsor</label><input type="text" id="mb_sponsor_' + idx + '" placeholder="Blank=CASH" style="padding:6px 8px;font-size:13px"></div>' +
+            '<div class="form-group" style="margin:0"><label style="font-size:11px">Earning (Rs.)</label><input type="number" id="mb_earning_' + idx + '" step="0.01" style="padding:6px 8px;font-size:13px"></div>' +
+            '<div class="form-group" style="margin:0"><label style="font-size:11px">Reason</label><input type="text" id="mb_reason_' + idx + '" placeholder="Why manual?" style="padding:6px 8px;font-size:13px"></div>' +
+          '</div>' +
+          '<div style="margin-top:8px;text-align:right"><button class="btn btn-primary btn-sm" onclick="addManualBill(' + idx + ')">Add to Pool</button></div>' +
         '</div>' +
         buildBillTable(r.billResults, idx) +
         (r.billFlags.length > 0 ? '<div class="flag-card card" style="margin-top:12px"><h3 style="color:#c53030">Flagged Bills (' + r.billFlags.length + ')</h3>' + buildFlagTable(r.billFlags) + '</div>' : '') +
@@ -1735,6 +1749,72 @@ function showBillDetail(docIdx, billIdx) {
   if (br.originalEarning != null) steps.push('\\u270E Override: Rs. ' + Math.round(br.originalEarning) + ' \\u2192 Rs. ' + Math.round(br.earning) + ' (' + br.overrideReason + ')');
   if (br.excluded) steps.push('\\u2718 EXCLUDED: ' + br.overrideReason);
   alert(steps.join('\\n'));
+}
+
+// ============ MANUAL BILL ADD ============
+function toggleManualBill(docIdx) {
+  var form = document.getElementById('manualBillForm_' + docIdx);
+  form.classList.toggle('hidden');
+}
+
+function addManualBill(docIdx) {
+  var billNo = document.getElementById('mb_billno_' + docIdx).value.trim() || 'MANUAL-' + Date.now();
+  var billDate = document.getElementById('mb_date_' + docIdx).value || new Date().toISOString().slice(0, 10);
+  var patient = document.getElementById('mb_patient_' + docIdx).value.trim() || 'Manual Entry';
+  var sponsor = document.getElementById('mb_sponsor_' + docIdx).value.trim();
+  var earning = parseFloat(document.getElementById('mb_earning_' + docIdx).value);
+  var reason = document.getElementById('mb_reason_' + docIdx).value.trim();
+
+  if (!earning || isNaN(earning)) { alert('Earning amount is required'); return; }
+  if (!reason) { alert('Reason for manual entry is required'); return; }
+
+  var r = calcResults[docIdx];
+  var payor = sponsor ? 'TPA' : 'CASH';
+  var payorUpper = (sponsor || '').toUpperCase();
+  if (payorUpper.indexOf('PMJAY') >= 0 || payorUpper.indexOf('BAJAJ GENERAL') >= 0) payor = 'PMJAY';
+  else if (payorUpper.indexOf('CGHS') >= 0 || payorUpper.indexOf('ECHS') >= 0 || payorUpper.indexOf('RGHS') >= 0) payor = 'Govt';
+
+  // Create a bill result object
+  var br = {
+    payor: payor,
+    baseMethod: 'MANUAL',
+    baseAmount: earning,
+    selfRef: true,
+    splitPct: 100,
+    earning: earning,
+    pkgOverride: false,
+    pkgName: null,
+    flagged: false,
+    flagReason: '',
+    excluded: false,
+    originalEarning: null,
+    overrideReason: 'Manual entry: ' + reason,
+    centre: Object.keys(r.centresUsed || {})[0] || 'Manual',
+    bill: {
+      billNo: billNo,
+      billDate: billDate,
+      patientName: patient,
+      consultDoctor: r.doctor ? r.doctor.name : '',
+      refDoctor: '',
+      sponsor: sponsor,
+      ipOp: 'IP',
+      _centre: Object.keys(r.centresUsed || {})[0] || 'Manual',
+      rows: [{ department: 'Manual', serviceName: 'Manual Entry', doctorAmt: earning, serviceAmt: earning, netAmt: earning }]
+    }
+  };
+
+  r.billResults.push(br);
+
+  // Hide form and clear
+  document.getElementById('manualBillForm_' + docIdx).classList.add('hidden');
+  document.getElementById('mb_billno_' + docIdx).value = '';
+  document.getElementById('mb_patient_' + docIdx).value = '';
+  document.getElementById('mb_earning_' + docIdx).value = '';
+  document.getElementById('mb_reason_' + docIdx).value = '';
+
+  // Recalc
+  recalcDoctor(docIdx);
+  toast('Manual bill added: ' + billNo + ' — ' + fmtRs(earning));
 }
 
 // ============ BILL & SETTLEMENT OVERRIDES ============
@@ -2203,6 +2283,129 @@ async function savePayment() {
 </script>`;
 
   return htmlShell('Settlements', 'settlements', body, script);
+}
+
+// ===================== PAGE: Doctor Ledger =====================
+async function doctorLedgerPage(env, doctorId) {
+  const doc = await env.DB.prepare('SELECT * FROM doctors WHERE id = ?').bind(doctorId).first();
+  if (!doc) return htmlShell('Not Found', 'doctors', '<h1>Doctor not found</h1>');
+
+  const contract = await env.DB.prepare('SELECT * FROM contracts WHERE doctor_id = ?').bind(doctorId).first();
+  const settlements = (await env.DB.prepare('SELECT * FROM monthly_settlements WHERE doctor_id = ? ORDER BY month DESC').bind(doctorId).all()).results || [];
+  const adjustments = (await env.DB.prepare('SELECT * FROM adjustments WHERE doctor_id = ? ORDER BY month DESC').bind(doctorId).all()).results || [];
+
+  // Build adjustment lookup by month
+  const adjByMonth = {};
+  for (const a of adjustments) {
+    if (!adjByMonth[a.month]) adjByMonth[a.month] = 0;
+    adjByMonth[a.month] += a.amount || 0;
+  }
+
+  // Compute running totals
+  let totalPool = 0, totalGross = 0, totalTds = 0, totalNet = 0, totalPaid = 0, totalAdj = 0;
+  let monthRows = '';
+  const sortedSettlements = [...settlements].reverse(); // chronological for running totals
+  let runningPaid = 0, runningDue = 0;
+
+  for (const s of sortedSettlements) {
+    const pool = s.calculated_pool || 0;
+    const gross = s.final_payout || 0;
+    const tds = s.tds_amount || (gross * 0.1);
+    const net = s.net_payout || (gross - tds);
+    const adj = adjByMonth[s.month] || 0;
+    const finalNet = net + adj;
+    const paid = s.payment_amount || 0;
+    const pending = finalNet - paid;
+
+    totalPool += pool;
+    totalGross += gross;
+    totalTds += tds;
+    totalNet += finalNet;
+    totalPaid += paid;
+    totalAdj += adj;
+    runningPaid += paid;
+    runningDue += (paid > 0 ? 0 : finalNet);
+
+    const st = s.status || (s.payment_utr ? 'paid' : (s.locked ? 'locked' : 'draft'));
+    const statusBadges = { draft: 'badge-inactive', locked: 'badge-mgm', approved: 'badge-retainer', paid: 'badge-active' };
+    const statusLabels = { draft: 'Draft', locked: 'Locked', approved: 'Approved', paid: 'Paid' };
+
+    monthRows += `<tr>
+      <td>${s.month}</td>
+      <td>${s.centre}</td>
+      <td style="text-align:right">${fmtRs(pool)}</td>
+      <td style="text-align:right">${fmtRs(gross)}</td>
+      <td style="text-align:right;color:#c53030">${fmtRs(tds)}</td>
+      <td style="text-align:right">${adj !== 0 ? '<span style="color:' + (adj < 0 ? '#c53030' : '#276749') + '">' + (adj > 0 ? '+' : '') + fmtRs(adj) + '</span>' : '—'}</td>
+      <td style="text-align:right;font-weight:600;color:#276749">${fmtRs(finalNet)}</td>
+      <td style="text-align:right">${paid > 0 ? fmtRs(paid) : '—'}</td>
+      <td style="text-align:right;color:${pending > 0 ? '#c53030' : '#276749'}">${paid > 0 ? fmtRs(0) : fmtRs(finalNet)}</td>
+      <td><span class="badge ${statusBadges[st] || 'badge-inactive'}">${statusLabels[st] || st}</span></td>
+      <td>${s.payment_utr || '—'}</td>
+      <td>${s.payment_utr ? '<a href="/statement/' + s.id + '" target="_blank" class="btn btn-outline btn-sm" style="padding:2px 8px;font-size:11px">View</a>' : ''}</td>
+    </tr>`;
+  }
+
+  // Reverse for display (newest first)
+  const displayRows = monthRows.split('</tr>').reverse().filter(r => r.trim()).map(r => r + '</tr>').join('');
+
+  const ctype = contract ? contract.contract_type : '—';
+  const tdsRate = contract ? (contract.tds_rate || 10) : 10;
+  const pendingTotal = totalNet - totalPaid;
+
+  const body = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:24px">
+      <div>
+        <h1>${doc.display_name || doc.name}</h1>
+        <p class="subtitle" style="margin:0"><span class="badge ${badgeClass(ctype)}">${ctype}</span> ${ctype === 'MGM' ? '| MGM: ' + fmtRs(contract.mgm_amount) + ' | Threshold: ' + fmtRs(contract.threshold_amount) : ''} | TDS: ${tdsRate}%</p>
+      </div>
+      <div class="btn-group">
+        <a href="/doctors/edit/${doc.id}" class="btn btn-outline">Edit Contract</a>
+        <a href="/doctors" class="btn btn-outline">← All Doctors</a>
+      </div>
+    </div>
+
+    <div class="stat-grid">
+      <div class="stat-card"><div class="label">Total Pool</div><div class="value" style="color:#2b6cb0">${fmtRs(totalPool)}</div><div class="sub">${settlements.length} months</div></div>
+      <div class="stat-card"><div class="label">Total Gross</div><div class="value">${fmtRs(totalGross)}</div></div>
+      <div class="stat-card"><div class="label">Total TDS</div><div class="value" style="color:#c53030">${fmtRs(totalTds)}</div></div>
+      <div class="stat-card"><div class="label">Total Net</div><div class="value" style="color:#276749">${fmtRs(totalNet)}</div></div>
+      <div class="stat-card"><div class="label">Total Paid</div><div class="value" style="color:#276749">${fmtRs(totalPaid)}</div></div>
+      <div class="stat-card"><div class="label">Pending</div><div class="value" style="color:${pendingTotal > 0 ? '#c53030' : '#276749'}">${fmtRs(pendingTotal)}</div></div>
+    </div>
+
+    <div class="card" style="padding:0;overflow-x:auto">
+      <table style="font-size:13px">
+        <thead><tr>
+          <th class="sortable">Month</th><th>Centre</th>
+          <th class="sortable" style="text-align:right">Pool</th>
+          <th class="sortable" style="text-align:right">Gross</th>
+          <th style="text-align:right">TDS</th>
+          <th style="text-align:right">Adj</th>
+          <th class="sortable" style="text-align:right">Net</th>
+          <th style="text-align:right">Paid</th>
+          <th style="text-align:right">Pending</th>
+          <th>Status</th><th>UTR</th><th>Statement</th>
+        </tr></thead>
+        <tbody>
+          ${displayRows || '<tr><td colspan="12" style="text-align:center;padding:24px;color:#a0aec0">No settlements yet</td></tr>'}
+          <tr style="font-weight:700;background:#f7fafc;border-top:2px solid #1a365d">
+            <td colspan="2">TOTALS</td>
+            <td style="text-align:right">${fmtRs(totalPool)}</td>
+            <td style="text-align:right">${fmtRs(totalGross)}</td>
+            <td style="text-align:right;color:#c53030">${fmtRs(totalTds)}</td>
+            <td style="text-align:right">${totalAdj !== 0 ? fmtRs(totalAdj) : '—'}</td>
+            <td style="text-align:right;color:#276749">${fmtRs(totalNet)}</td>
+            <td style="text-align:right">${fmtRs(totalPaid)}</td>
+            <td style="text-align:right;color:${pendingTotal > 0 ? '#c53030' : '#276749'}">${fmtRs(pendingTotal)}</td>
+            <td colspan="3"></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  `;
+
+  return htmlShell('Ledger — ' + (doc.display_name || doc.name), 'doctors', body);
 }
 
 // ===================== PAGE: Bulk Import =====================
@@ -3372,10 +3575,16 @@ async function doctorPortalPage(env, doctorId) {
   const settlements = (await env.DB.prepare('SELECT * FROM monthly_settlements WHERE doctor_id = ? ORDER BY month DESC, centre LIMIT 50').bind(doctorId).all()).results || [];
 
   let rows = '';
+  let totalPool = 0, totalGross = 0, totalTds = 0, totalNet = 0, totalPaid = 0;
   for (const s of settlements) {
     const hasPmt = !!s.payment_utr;
     const tdsAmt = s.tds_amount || 0;
     const netPayout = s.net_payout || (s.final_payout - tdsAmt);
+    totalPool += s.calculated_pool || 0;
+    totalGross += s.final_payout || 0;
+    totalTds += tdsAmt;
+    totalNet += netPayout;
+    if (hasPmt) totalPaid += s.payment_amount || netPayout;
     rows += `<tr>
       <td>${s.month}</td>
       <td>${s.centre}</td>
@@ -3388,11 +3597,18 @@ async function doctorPortalPage(env, doctorId) {
       <td>${hasPmt ? '<a href="/statement/' + s.id + '" target="_blank" class="btn btn-primary btn-sm">Download</a>' : ''}</td>
     </tr>`;
   }
+  const pendingTotal = totalNet - totalPaid;
 
   const body = `
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:24px">
       <div><h1>My Payout Statements</h1><p class="subtitle" style="margin:0">${doc.display_name || doc.name}</p></div>
       <a href="/logout" class="btn btn-outline">Logout</a>
+    </div>
+    <div class="stat-grid">
+      <div class="stat-card"><div class="label">Total Earned</div><div class="value" style="color:#2b6cb0">${fmtRs(totalPool)}</div><div class="sub">${settlements.length} months</div></div>
+      <div class="stat-card"><div class="label">Total Paid</div><div class="value" style="color:#276749">${fmtRs(totalPaid)}</div></div>
+      <div class="stat-card"><div class="label">Total TDS</div><div class="value" style="color:#c53030">${fmtRs(totalTds)}</div></div>
+      <div class="stat-card"><div class="label">Pending</div><div class="value" style="color:${pendingTotal > 0 ? '#c53030' : '#276749'}">${fmtRs(pendingTotal)}</div></div>
     </div>
     <div class="card" style="padding:0;overflow-x:auto">
       <table>
@@ -3519,6 +3735,9 @@ export default {
       } else if (path.match(/^\/doctors\/edit\/(\d+)$/)) {
         const id = parseInt(path.match(/^\/doctors\/edit\/(\d+)$/)[1]);
         html = await doctorFormPage(env, id);
+      } else if (path.match(/^\/doctors\/ledger\/(\d+)$/)) {
+        const id = parseInt(path.match(/^\/doctors\/ledger\/(\d+)$/)[1]);
+        html = await doctorLedgerPage(env, id);
       } else if (path === '/settlements') {
         html = await settlementsPage(env, url.searchParams);
       } else if (path === '/aliases') {
