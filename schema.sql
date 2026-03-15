@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS contracts (
   opd_govt_pct REAL,
   rb_hospital_fixed REAL,
   rb_includes_robotic INTEGER,
+  tds_rate REAL DEFAULT 10,
   notes TEXT,
   effective_date TEXT,
   created_at TEXT DEFAULT (datetime('now'))

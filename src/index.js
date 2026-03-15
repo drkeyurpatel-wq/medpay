@@ -378,6 +378,20 @@ async function doctorFormPage(env, doctorId = null) {
         </div>
       </div>
 
+      <!-- TDS -->
+      <div class="form-section">
+        <div class="form-section-title">TDS (Tax Deducted at Source)</div>
+        <div class="form-row">
+          <div class="form-group"><label>TDS Rate</label>
+            <select id="f_tds_rate">
+              <option value="10" ${v('tds_rate', 10) == 10 ? 'selected' : ''}>10% (Standard)</option>
+              <option value="1" ${v('tds_rate', 10) == 1 ? 'selected' : ''}>1% (Low TDS Certificate)</option>
+              <option value="0" ${v('tds_rate', 10) == 0 ? 'selected' : ''}>0% (Exempt)</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
       <!-- SECTION 3: Settlement Terms -->
       <div class="form-section" id="sec_settlement" style="display:none">
         <div class="form-section-title">Section 3 — Settlement Terms</div>
@@ -633,7 +647,8 @@ document.getElementById('doctorForm').addEventListener('submit', async function(
       rb_hospital_fixed: gn('f_rb_hospital_fixed'),
       rb_includes_robotic: parseInt(gv('f_rb_includes_robotic')) || 0,
       notes: gv('f_notes').trim() || null,
-      effective_date: gv('f_effective_date') || null
+      effective_date: gv('f_effective_date') || null,
+      tds_rate: parseFloat(gv('f_tds_rate')) || 10
     },
     packages: packages,
     aliases: aliases,
@@ -1317,6 +1332,9 @@ function calcSettlement(docId, billResults, contract) {
     pool: pool,
     pmjayPool: pmjayPool,
     payout: payout,
+    tdsRate: contract ? (contract.tds_rate != null ? contract.tds_rate : 10) : 10,
+    tdsAmount: payout * ((contract ? (contract.tds_rate != null ? contract.tds_rate : 10) : 10) / 100),
+    netPayout: payout - (payout * ((contract ? (contract.tds_rate != null ? contract.tds_rate : 10) : 10) / 100)),
     mgmTriggered: mgmTriggered,
     incentiveTriggered: incentiveTriggered,
     incentiveAmount: incentiveAmount
@@ -1398,12 +1416,14 @@ function displayResults(results) {
   document.getElementById('results').classList.remove('hidden');
 
   var totalPayout = 0, totalPool = 0, totalBills = 0, flagCount = allFlags.length;
-  var hospitalShortfall = 0;
+  var hospitalShortfall = 0, totalTds = 0, totalNet = 0;
   results.forEach(function(r) {
     totalPayout += r.settlement.payout;
     totalPool += r.settlement.pool;
     totalBills += r.billResults.length;
     flagCount += r.billFlags.length;
+    totalTds += r.settlement.tdsAmount;
+    totalNet += r.settlement.netPayout;
     if (r.settlement.mgmTriggered) hospitalShortfall += (r.settlement.payout - r.settlement.pool);
   });
 
@@ -1411,8 +1431,10 @@ function displayResults(results) {
     '<div class="stat-card"><div class="label">Doctors</div><div class="value">' + results.length + '</div></div>' +
     '<div class="stat-card"><div class="label">Total Bills</div><div class="value">' + totalBills + '</div></div>' +
     '<div class="stat-card"><div class="label">Total Prof Fee Pool</div><div class="value" style="color:#2b6cb0">' + fmtRs(totalPool) + '</div><div class="sub">Actual earnings from bills</div></div>' +
-    '<div class="stat-card"><div class="label">Total Payout</div><div class="value" style="color:#276749">' + fmtRs(totalPayout) + '</div><div class="sub">After MGM/settlement applied</div></div>' +
-    (hospitalShortfall > 0 ? '<div class="stat-card"><div class="label">Hospital MGM Shortfall</div><div class="value" style="color:#c53030">' + fmtRs(hospitalShortfall) + '</div><div class="sub">Hospital absorbing deficit</div></div>' : '') +
+    '<div class="stat-card"><div class="label">Gross Payout</div><div class="value">' + fmtRs(totalPayout) + '</div><div class="sub">After MGM/settlement</div></div>' +
+    '<div class="stat-card"><div class="label">Total TDS</div><div class="value" style="color:#c53030">' + fmtRs(totalTds) + '</div><div class="sub">Deducted at source</div></div>' +
+    '<div class="stat-card"><div class="label">Net Payout</div><div class="value" style="color:#276749">' + fmtRs(totalNet) + '</div><div class="sub">Amount to doctor</div></div>' +
+    (hospitalShortfall > 0 ? '<div class="stat-card"><div class="label">Hospital MGM Shortfall</div><div class="value" style="color:#c53030">' + fmtRs(hospitalShortfall) + '</div></div>' : '') +
     '<div class="stat-card"><div class="label">Flags</div><div class="value" style="color:' + (flagCount > 0 ? '#c53030' : '#276749') + '">' + flagCount + '</div></div>';
 
   var html = '';
@@ -1453,10 +1475,10 @@ function displayResults(results) {
       '<div class="card-header collapsible" onclick="toggleCollapse(' + idx + ')">' +
         '<div style="flex:1">' +
           '<div class="card-title">' + (doc ? doc.display_name || doc.name : 'Unknown') + ' <span class="badge ' + badgeClass(ct) + '">' + ct + '</span>' + centreBadges + triggers + '</div>' +
-          '<div class="pool-amount" style="margin-top:4px">Prof Fee Pool: <strong>' + fmtRs(s.pool) + '</strong>' + (s.pmjayPool > 0 ? ' (PMJAY: ' + fmtRs(s.pmjayPool) + ')' : '') + ' \\u2192 Payout: <strong style="color:#276749">' + fmtRs(s.payout) + '</strong></div>' +
+          '<div class="pool-amount" style="margin-top:4px">Pool: <strong>' + fmtRs(s.pool) + '</strong>' + (s.pmjayPool > 0 ? ' (PMJAY: ' + fmtRs(s.pmjayPool) + ')' : '') + ' \\u2192 Gross: <strong>' + fmtRs(s.payout) + '</strong> \\u2212 TDS ' + s.tdsRate + '%: ' + fmtRs(s.tdsAmount) + ' = <strong style="color:#276749">' + fmtRs(s.netPayout) + '</strong></div>' +
           payorLine +
         '</div>' +
-        '<div class="payout-amount">' + fmtRs(s.payout) + '</div>' +
+        '<div class="payout-amount">' + fmtRs(s.netPayout) + '<div style="font-size:11px;color:#718096;font-weight:400">Net of TDS</div></div>' +
       '</div>' +
       '<div class="collapsible-content" id="collapse_' + idx + '">' +
         buildPoolSummary(r) +
@@ -1510,7 +1532,9 @@ function buildPoolSummary(r) {
   if (pb.Govt > 0) h += '<div><div style="font-size:11px;color:#718096">GOVT</div><div style="font-size:14px;font-weight:600">' + fmtRs(pb.Govt) + '</div></div>';
   if (pb.OPD > 0) h += '<div><div style="font-size:11px;color:#718096">OPD</div><div style="font-size:14px;font-weight:600">' + fmtRs(pb.OPD) + '</div></div>';
 
-  h += '<div><div style="font-size:11px;color:#718096;font-weight:600">FINAL PAYOUT</div><div style="font-size:18px;font-weight:700;color:#276749">' + fmtRs(s.payout) + '</div></div>';
+  h += '<div><div style="font-size:11px;color:#718096;font-weight:600">GROSS PAYOUT</div><div style="font-size:18px;font-weight:700">' + fmtRs(s.payout) + '</div></div>';
+  h += '<div><div style="font-size:11px;color:#c53030;font-weight:600">TDS @ ' + s.tdsRate + '%</div><div style="font-size:14px;font-weight:700;color:#c53030">-' + fmtRs(s.tdsAmount) + '</div></div>';
+  h += '<div><div style="font-size:11px;color:#276749;font-weight:600">NET PAYOUT</div><div style="font-size:18px;font-weight:700;color:#276749">' + fmtRs(s.netPayout) + '</div></div>';
 
   if (c && c.contract_type === 'MGM') {
     h += '<div><div style="font-size:11px;color:#718096">MGM Floor</div><div style="font-size:14px;font-weight:600">' + fmtRs(c.mgm_amount) + '</div></div>';
@@ -1682,6 +1706,8 @@ async function saveSettlements() {
       mgm_triggered: r.settlement.mgmTriggered ? 1 : 0,
       incentive_triggered: r.settlement.incentiveTriggered ? 1 : 0,
       incentive_amount: r.settlement.incentiveAmount,
+      tds_amount: r.settlement.tdsAmount,
+      net_payout: r.settlement.netPayout,
       bills: r.billResults.map(function(br) {
         return {
           bill_no: br.bill.billNo,
@@ -2004,14 +2030,14 @@ async function handleApi(request, env, path) {
       const doctorId = res.meta.last_row_id;
 
       // Insert contract
-      await env.DB.prepare(`INSERT INTO contracts (doctor_id, contract_type, mgm_amount, threshold_amount, incentive_pct, retainer_pool_pct, cash_base_method, cash_b_pct, cash_self_pct, cash_other_pct, tpa_base_method, tpa_b_pct, tpa_self_pct, tpa_other_pct, pmjay_base_method, pmjay_pct, pmjay_in_mgm_pool, govt_base_method, govt_b_pct, govt_self_pct, govt_other_pct, opd_non_govt_pct, opd_govt_pct, rb_hospital_fixed, rb_includes_robotic, notes, effective_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
+      await env.DB.prepare(`INSERT INTO contracts (doctor_id, contract_type, mgm_amount, threshold_amount, incentive_pct, retainer_pool_pct, cash_base_method, cash_b_pct, cash_self_pct, cash_other_pct, tpa_base_method, tpa_b_pct, tpa_self_pct, tpa_other_pct, pmjay_base_method, pmjay_pct, pmjay_in_mgm_pool, govt_base_method, govt_b_pct, govt_self_pct, govt_other_pct, opd_non_govt_pct, opd_govt_pct, rb_hospital_fixed, rb_includes_robotic, notes, effective_date, tds_rate) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
         doctorId, c.contract_type, c.mgm_amount, c.threshold_amount, c.incentive_pct, c.retainer_pool_pct,
         c.cash_base_method, c.cash_b_pct, c.cash_self_pct, c.cash_other_pct,
         c.tpa_base_method, c.tpa_b_pct, c.tpa_self_pct, c.tpa_other_pct,
         c.pmjay_base_method, c.pmjay_pct, c.pmjay_in_mgm_pool,
         c.govt_base_method, c.govt_b_pct, c.govt_self_pct, c.govt_other_pct,
         c.opd_non_govt_pct, c.opd_govt_pct, c.rb_hospital_fixed, c.rb_includes_robotic,
-        c.notes, c.effective_date
+        c.notes, c.effective_date, c.tds_rate || 10
       ).run();
 
       // Insert procedure packages
@@ -2064,14 +2090,14 @@ async function handleApi(request, env, path) {
       // Upsert contract
       if (c) {
         await env.DB.prepare('DELETE FROM contracts WHERE doctor_id = ?').bind(doctorId).run();
-        await env.DB.prepare(`INSERT INTO contracts (doctor_id, contract_type, mgm_amount, threshold_amount, incentive_pct, retainer_pool_pct, cash_base_method, cash_b_pct, cash_self_pct, cash_other_pct, tpa_base_method, tpa_b_pct, tpa_self_pct, tpa_other_pct, pmjay_base_method, pmjay_pct, pmjay_in_mgm_pool, govt_base_method, govt_b_pct, govt_self_pct, govt_other_pct, opd_non_govt_pct, opd_govt_pct, rb_hospital_fixed, rb_includes_robotic, notes, effective_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
+        await env.DB.prepare(`INSERT INTO contracts (doctor_id, contract_type, mgm_amount, threshold_amount, incentive_pct, retainer_pool_pct, cash_base_method, cash_b_pct, cash_self_pct, cash_other_pct, tpa_base_method, tpa_b_pct, tpa_self_pct, tpa_other_pct, pmjay_base_method, pmjay_pct, pmjay_in_mgm_pool, govt_base_method, govt_b_pct, govt_self_pct, govt_other_pct, opd_non_govt_pct, opd_govt_pct, rb_hospital_fixed, rb_includes_robotic, notes, effective_date, tds_rate) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
           doctorId, c.contract_type, c.mgm_amount, c.threshold_amount, c.incentive_pct, c.retainer_pool_pct,
           c.cash_base_method, c.cash_b_pct, c.cash_self_pct, c.cash_other_pct,
           c.tpa_base_method, c.tpa_b_pct, c.tpa_self_pct, c.tpa_other_pct,
           c.pmjay_base_method, c.pmjay_pct, c.pmjay_in_mgm_pool,
           c.govt_base_method, c.govt_b_pct, c.govt_self_pct, c.govt_other_pct,
           c.opd_non_govt_pct, c.opd_govt_pct, c.rb_hospital_fixed, c.rb_includes_robotic,
-          c.notes, c.effective_date
+          c.notes, c.effective_date, c.tds_rate || 10
         ).run();
       }
 
@@ -2131,8 +2157,8 @@ async function handleApi(request, env, path) {
     if (!json || !Array.isArray(json)) return new Response('Expected array', { status: 400 });
     try {
       for (const s of json) {
-        const res = await env.DB.prepare(`INSERT INTO monthly_settlements (doctor_id, month, centre, calculated_pool, pmjay_pool, final_payout, mgm_triggered, incentive_triggered, incentive_amount) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
-          s.doctor_id, s.month, s.centre, s.calculated_pool, s.pmjay_pool, s.final_payout, s.mgm_triggered, s.incentive_triggered, s.incentive_amount
+        const res = await env.DB.prepare(`INSERT INTO monthly_settlements (doctor_id, month, centre, calculated_pool, pmjay_pool, final_payout, mgm_triggered, incentive_triggered, incentive_amount, tds_amount, net_payout) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
+          s.doctor_id, s.month, s.centre, s.calculated_pool, s.pmjay_pool, s.final_payout, s.mgm_triggered, s.incentive_triggered, s.incentive_amount, s.tds_amount || 0, s.net_payout || s.final_payout
         ).run();
         const settlementId = res.meta.last_row_id;
 
@@ -2211,86 +2237,74 @@ async function statementPage(env, settlementId) {
   const contract = await env.DB.prepare('SELECT * FROM contracts WHERE doctor_id = ?').bind(settlement.doctor_id).first();
   const bills = (await env.DB.prepare('SELECT * FROM bill_calculations WHERE settlement_id = ? ORDER BY bill_date, bill_no').bind(settlementId).all()).results || [];
 
-  // Compute payor breakdown
+  // Split IPD vs OPD, group IPD by bill_no (1 line per patient)
+  let ipdMap = {};
+  let opdTotal = 0, opdCount = 0;
   let cashPool = 0, tpaPool = 0, pmjayPool = 0, govtPool = 0, opdPool = 0;
-  let ipCount = 0, opCount = 0;
   for (const b of bills) {
     const amt = b.doctor_earning || 0;
-    if ((b.base_method || '').indexOf('OPD') === 0) { opdPool += amt; opCount++; }
-    else if (b.payor_type === 'CASH') { cashPool += amt; ipCount++; }
-    else if (b.payor_type === 'TPA') { tpaPool += amt; ipCount++; }
-    else if (b.payor_type === 'PMJAY') { pmjayPool += amt; ipCount++; }
-    else if (b.payor_type === 'Govt') { govtPool += amt; ipCount++; }
-    else { cashPool += amt; ipCount++; }
+    const isOPD = (b.base_method || '').indexOf('OPD') === 0;
+    if (isOPD) {
+      opdTotal += amt; opdCount++; opdPool += amt;
+    } else {
+      const key = b.bill_no || ('row-' + b.id);
+      if (!ipdMap[key]) {
+        ipdMap[key] = { bill_no: b.bill_no, bill_date: b.bill_date, patient_name: b.patient_name, payor_type: b.payor_type, payor_raw: b.payor_raw, base_method: b.base_method, earning: 0, self_ref: b.self_ref, split_pct: b.split_pct };
+      }
+      ipdMap[key].earning += amt;
+      if (b.payor_type === 'CASH') cashPool += amt;
+      else if (b.payor_type === 'TPA') tpaPool += amt;
+      else if (b.payor_type === 'PMJAY') pmjayPool += amt;
+      else if (b.payor_type === 'Govt') govtPool += amt;
+      else cashPool += amt;
+    }
   }
+  const ipdRows = Object.values(ipdMap);
+  const ipCount = ipdRows.length;
 
   const months = ['January','February','March','April','May','June','July','August','September','October','November','December'];
   const [yr, mn] = (settlement.month || '').split('-');
   const monthLabel = months[parseInt(mn) - 1] + ' ' + yr;
-
   const ctype = contract ? contract.contract_type : '—';
   const pool = settlement.calculated_pool || 0;
   const payout = settlement.final_payout || 0;
+  const tdsRate = contract ? (contract.tds_rate != null ? contract.tds_rate : 10) : 10;
+  const tdsAmt = settlement.tds_amount || (payout * tdsRate / 100);
+  const netPayout = settlement.net_payout || (payout - tdsAmt);
 
-  // Bill rows HTML
-  let billRowsHtml = '';
+  // IPD bill rows
+  let ipdRowsHtml = '';
   let sno = 1;
-  for (const b of bills) {
-    billRowsHtml += `<tr>
-      <td>${sno++}</td>
-      <td>${b.bill_no || ''}</td>
-      <td>${b.bill_date || ''}</td>
-      <td>${b.patient_name || ''}</td>
-      <td>${b.payor_type || ''}${b.payor_raw ? ' (' + (b.payor_raw || '').substring(0, 25) + ')' : ''}</td>
-      <td>${b.base_method || ''}</td>
-      <td style="text-align:right">${fmtRs(b.base_amount)}</td>
-      <td style="text-align:center">${b.split_pct || 100}%${b.self_ref ? ' (S)' : ''}</td>
-      <td style="text-align:right;font-weight:600">${fmtRs(b.doctor_earning)}</td>
-    </tr>`;
+  for (const r of ipdRows) {
+    ipdRowsHtml += `<tr><td>${sno++}</td><td>${r.bill_no || ''}</td><td>${r.bill_date || ''}</td><td>${r.patient_name || ''}</td><td>${r.payor_type || ''}${r.payor_raw ? ' (' + (r.payor_raw || '').substring(0, 20) + ')' : ''}</td><td style="text-align:right;font-weight:600">${fmtRs(r.earning)}</td></tr>`;
   }
 
-  // Settlement calculation explanation
-  let calcExplanation = '';
+  // Settlement calc
+  let calcRows = '';
   if (ctype === 'MGM') {
-    calcExplanation = `
-      <tr><td>Professional Fee Pool (from bills)</td><td style="text-align:right">${fmtRs(pool)}</td></tr>
+    calcRows = `<tr><td>Professional Fee Pool (from bills)</td><td style="text-align:right">${fmtRs(pool)}</td></tr>
       <tr><td>Monthly Minimum Guarantee (MGM)</td><td style="text-align:right">${fmtRs(contract.mgm_amount)}</td></tr>
       <tr><td>Incentive Threshold</td><td style="text-align:right">${fmtRs(contract.threshold_amount)}</td></tr>`;
     if (settlement.mgm_triggered) {
-      calcExplanation += `
-      <tr style="color:#c53030"><td>Pool below MGM — hospital covers shortfall of ${fmtRs(payout - pool)}</td><td style="text-align:right;font-weight:700">${fmtRs(payout)}</td></tr>`;
+      calcRows += `<tr style="color:#c53030"><td>Pool below MGM — hospital covers shortfall of ${fmtRs(payout - pool)}</td><td style="text-align:right;font-weight:700">${fmtRs(payout)}</td></tr>`;
     } else if (settlement.incentive_triggered) {
-      calcExplanation += `
-      <tr><td>Pool exceeded threshold by ${fmtRs(pool - contract.threshold_amount)}</td><td></td></tr>
+      calcRows += `<tr><td>Pool exceeded threshold by ${fmtRs(pool - contract.threshold_amount)}</td><td></td></tr>
       <tr><td>Incentive (${contract.incentive_pct}% of excess)</td><td style="text-align:right">${fmtRs(settlement.incentive_amount)}</td></tr>
-      <tr style="font-weight:700"><td>Final Payout (threshold + incentive)</td><td style="text-align:right">${fmtRs(payout)}</td></tr>`;
+      <tr style="font-weight:700"><td>Gross Payout (threshold + incentive)</td><td style="text-align:right">${fmtRs(payout)}</td></tr>`;
     } else {
-      calcExplanation += `
-      <tr><td>Pool between MGM and threshold — paid at pool</td><td style="text-align:right;font-weight:700">${fmtRs(payout)}</td></tr>`;
+      calcRows += `<tr><td>Pool between MGM and threshold — paid at pool</td><td style="text-align:right;font-weight:700">${fmtRs(payout)}</td></tr>`;
     }
   } else if (ctype === 'Retainer') {
-    calcExplanation = `
-      <tr><td>Fixed Retainer Amount</td><td style="text-align:right">${fmtRs(contract.mgm_amount)}</td></tr>
+    calcRows = `<tr><td>Fixed Retainer Amount</td><td style="text-align:right">${fmtRs(contract.mgm_amount)}</td></tr>
       ${contract.retainer_pool_pct ? '<tr><td>Pool Bonus (' + contract.retainer_pool_pct + '% of ' + fmtRs(pool) + ')</td><td style="text-align:right">' + fmtRs(pool * contract.retainer_pool_pct / 100) + '</td></tr>' : ''}
-      <tr style="font-weight:700"><td>Final Payout</td><td style="text-align:right">${fmtRs(payout)}</td></tr>`;
+      <tr style="font-weight:700"><td>Gross Payout</td><td style="text-align:right">${fmtRs(payout)}</td></tr>`;
   } else {
-    calcExplanation = `
-      <tr><td>Professional Fee Pool (from bills)</td><td style="text-align:right">${fmtRs(pool)}</td></tr>
-      <tr style="font-weight:700"><td>Final Payout</td><td style="text-align:right">${fmtRs(payout)}</td></tr>`;
+    calcRows = `<tr><td>Professional Fee Pool (from bills)</td><td style="text-align:right">${fmtRs(pool)}</td></tr>
+      <tr style="font-weight:700"><td>Gross Payout</td><td style="text-align:right">${fmtRs(payout)}</td></tr>`;
   }
-
-  // Payment section
-  let paymentHtml = '';
-  if (settlement.payment_utr) {
-    paymentHtml = `
-    <table style="width:100%;margin-top:20px;border-collapse:collapse">
-      <tr><td style="padding:6px 0;border-bottom:1px solid #e2e8f0;width:40%"><strong>Payment Reference (UTR)</strong></td><td style="padding:6px 0;border-bottom:1px solid #e2e8f0">${settlement.payment_utr}</td></tr>
-      <tr><td style="padding:6px 0;border-bottom:1px solid #e2e8f0"><strong>Payment Date</strong></td><td style="padding:6px 0;border-bottom:1px solid #e2e8f0">${settlement.payment_date || '—'}</td></tr>
-      <tr><td style="padding:6px 0;border-bottom:1px solid #e2e8f0"><strong>Payment Mode</strong></td><td style="padding:6px 0;border-bottom:1px solid #e2e8f0">${settlement.payment_mode || '—'}</td></tr>
-      <tr><td style="padding:6px 0;border-bottom:1px solid #e2e8f0"><strong>Bank</strong></td><td style="padding:6px 0;border-bottom:1px solid #e2e8f0">${settlement.payment_bank || '—'}</td></tr>
-      <tr><td style="padding:6px 0;border-bottom:1px solid #e2e8f0"><strong>Amount Paid</strong></td><td style="padding:6px 0;border-bottom:1px solid #e2e8f0;font-weight:700;font-size:16px">${fmtRs(settlement.payment_amount)}</td></tr>
-    </table>`;
-  }
+  // TDS rows always
+  calcRows += `<tr style="color:#c53030"><td>Less: TDS @ ${tdsRate}%</td><td style="text-align:right">- ${fmtRs(tdsAmt)}</td></tr>
+    <tr style="font-weight:700;font-size:16px;background:#ebf4ff"><td>Net Payout</td><td style="text-align:right;color:#276749">${fmtRs(netPayout)}</td></tr>`;
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -2317,7 +2331,6 @@ async function statementPage(env, settlementId) {
     .info-item { padding: 8px 12px; background: #f7fafc; border-radius: 4px; }
     .info-item .label { font-size: 11px; color: #718096; text-transform: uppercase; }
     .info-item .value { font-size: 15px; font-weight: 600; color: #1a202c; margin-top: 2px; }
-    .info-item .value.highlight { color: #276749; font-size: 18px; }
     .pool-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; margin-top: 8px; }
     .pool-cell { text-align: center; padding: 8px; background: #f7fafc; border-radius: 4px; }
     .pool-cell .label { font-size: 10px; color: #718096; }
@@ -2329,9 +2342,13 @@ async function statementPage(env, settlementId) {
     .bill-table td { padding: 5px 8px; border-bottom: 1px solid #f0f0f0; }
     .bill-table tr:nth-child(even) { background: #fafafa; }
     .total-row td { font-weight: 700; border-top: 2px solid #1a365d; background: #ebf4ff; }
+    .opd-row td { background: #f0fff4; font-style: italic; }
     .signature-section { margin-top: 48px; display: grid; grid-template-columns: 1fr 1fr; gap: 48px; }
     .sig-box { text-align: center; }
     .sig-line { border-top: 1px solid #cbd5e0; margin-top: 60px; padding-top: 8px; font-size: 12px; color: #718096; }
+    .pmt-table { width: 100%; border-collapse: collapse; }
+    .pmt-table td { padding: 8px 12px; border-bottom: 1px solid #e2e8f0; font-size: 14px; }
+    .pmt-table td:first-child { width: 40%; font-weight: 600; color: #4a5568; }
     .footer { margin-top: 32px; padding-top: 16px; border-top: 1px solid #e2e8f0; text-align: center; font-size: 11px; color: #a0aec0; }
     .no-print { margin: 20px auto; max-width: 900px; text-align: right; }
     .btn { display: inline-flex; align-items: center; gap: 6px; padding: 10px 20px; border: none; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; text-decoration: none; }
@@ -2354,7 +2371,6 @@ async function statementPage(env, settlementId) {
   </div>
   <div class="page">
     <div class="page-inner">
-      <!-- LETTERHEAD -->
       <div class="header">
         <div class="header-left">
           <h1>Health<span>1</span> Super Speciality Hospitals</h1>
@@ -2371,7 +2387,6 @@ async function statementPage(env, settlementId) {
 
       <div class="title-bar">PROFESSIONAL FEE PAYOUT STATEMENT</div>
 
-      <!-- DOCTOR & PERIOD -->
       <div class="section">
         <div class="info-grid">
           <div class="info-item"><div class="label">Doctor</div><div class="value">${settlement.display_name || settlement.doctor_name}</div></div>
@@ -2381,7 +2396,6 @@ async function statementPage(env, settlementId) {
         </div>
       </div>
 
-      <!-- POOL SUMMARY -->
       <div class="section">
         <div class="section-title">Professional Fee Pool — Payor Breakdown</div>
         <div class="pool-grid">
@@ -2393,51 +2407,46 @@ async function statementPage(env, settlementId) {
         </div>
         <div class="info-grid" style="margin-top:8px">
           <div class="info-item"><div class="label">Total Prof Fee Pool</div><div class="value" style="color:#2b6cb0;font-size:18px">${fmtRs(pool)}</div></div>
-          <div class="info-item"><div class="label">Total Bills (IP: ${ipCount} | OP: ${opCount})</div><div class="value">${bills.length} bills processed</div></div>
+          <div class="info-item"><div class="label">Bills</div><div class="value">IPD: ${ipCount} patients | OPD: ${opdCount} visits</div></div>
         </div>
       </div>
 
-      <!-- SETTLEMENT CALCULATION -->
       <div class="section">
         <div class="section-title">Settlement Calculation</div>
-        <table class="calc-table">
-          ${calcExplanation}
-        </table>
+        <table class="calc-table">${calcRows}</table>
       </div>
 
-      <!-- PAYMENT DETAILS -->
       ${settlement.payment_utr ? `<div class="section">
         <div class="section-title">Payment Details</div>
-        ${paymentHtml}
+        <table class="pmt-table">
+          <tr><td>Payment Reference (UTR)</td><td>${settlement.payment_utr}</td></tr>
+          <tr><td>Payment Date</td><td>${settlement.payment_date || '—'}</td></tr>
+          <tr><td>Payment Mode</td><td>${settlement.payment_mode || '—'}</td></tr>
+          <tr><td>Bank</td><td>${settlement.payment_bank || '—'}</td></tr>
+          <tr><td>Gross Amount</td><td>${fmtRs(payout)}</td></tr>
+          <tr><td>TDS Deducted (${tdsRate}%)</td><td style="color:#c53030">- ${fmtRs(tdsAmt)}</td></tr>
+          <tr><td style="font-weight:700">Net Amount Paid</td><td style="font-weight:700;font-size:16px;color:#276749">${fmtRs(settlement.payment_amount || netPayout)}</td></tr>
+        </table>
       </div>` : ''}
 
-      <!-- BILL BREAKDOWN -->
       <div class="section">
-        <div class="section-title">Bill-by-Bill Breakdown</div>
+        <div class="section-title">IPD — Patient-wise Breakdown (${ipCount} patients)</div>
         <table class="bill-table">
-          <thead>
-            <tr><th>#</th><th>Bill No</th><th>Date</th><th>Patient</th><th>Payor</th><th>Method</th><th style="text-align:right">Base</th><th style="text-align:center">Split</th><th style="text-align:right">Earning</th></tr>
-          </thead>
+          <thead><tr><th>#</th><th>Bill No</th><th>Date</th><th>Patient</th><th>Payor</th><th style="text-align:right">Doctor Earning</th></tr></thead>
           <tbody>
-            ${billRowsHtml}
+            ${ipdRowsHtml}
+            ${opdCount > 0 ? '<tr class="opd-row"><td></td><td colspan="4">OPD Consultations (' + opdCount + ' visits — consolidated)</td><td style="text-align:right;font-weight:600">' + fmtRs(opdTotal) + '</td></tr>' : ''}
             <tr class="total-row">
-              <td colspan="6">TOTAL (${bills.length} bills)</td>
-              <td></td>
-              <td></td>
+              <td colspan="5">TOTAL PROFESSIONAL FEE POOL</td>
               <td style="text-align:right;font-size:13px">${fmtRs(pool)}</td>
             </tr>
           </tbody>
         </table>
       </div>
 
-      <!-- SIGNATURE -->
       <div class="signature-section">
-        <div class="sig-box">
-          <div class="sig-line">For Health1 Super Speciality Hospitals</div>
-        </div>
-        <div class="sig-box">
-          <div class="sig-line">${settlement.display_name || settlement.doctor_name}</div>
-        </div>
+        <div class="sig-box"><div class="sig-line">For Health1 Super Speciality Hospitals</div></div>
+        <div class="sig-box"><div class="sig-line">${settlement.display_name || settlement.doctor_name}</div></div>
       </div>
 
       <div class="footer">
@@ -2446,6 +2455,63 @@ async function statementPage(env, settlementId) {
       </div>
     </div>
   </div>
+</body>
+</html>`;
+}
+
+// ===================== PAGE: Doctor Portal =====================
+async function doctorPortalPage(env, doctorId) {
+  const doc = await env.DB.prepare('SELECT * FROM doctors WHERE id = ?').bind(doctorId).first();
+  if (!doc) return htmlShell('Error', '', '<h1>Doctor not found</h1>');
+
+  const settlements = (await env.DB.prepare('SELECT * FROM monthly_settlements WHERE doctor_id = ? ORDER BY month DESC, centre LIMIT 50').bind(doctorId).all()).results || [];
+
+  let rows = '';
+  for (const s of settlements) {
+    const hasPmt = !!s.payment_utr;
+    const tdsAmt = s.tds_amount || 0;
+    const netPayout = s.net_payout || (s.final_payout - tdsAmt);
+    rows += `<tr>
+      <td>${s.month}</td>
+      <td>${s.centre}</td>
+      <td>${fmtRs(s.calculated_pool)}</td>
+      <td>${fmtRs(s.final_payout)}</td>
+      <td style="color:#c53030">${fmtRs(tdsAmt)}</td>
+      <td style="font-weight:700;color:#276749">${fmtRs(netPayout)}</td>
+      <td>${hasPmt ? '<span class="badge badge-active">Paid</span>' : (s.locked ? '<span class="badge" style="background:#fefcbf;color:#975a16">Processing</span>' : '<span class="badge badge-inactive">Draft</span>')}</td>
+      <td>${hasPmt ? s.payment_utr : '—'}</td>
+      <td>${hasPmt ? '<a href="/statement/' + s.id + '" target="_blank" class="btn btn-primary btn-sm">Download</a>' : ''}</td>
+    </tr>`;
+  }
+
+  const body = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:24px">
+      <div><h1>My Payout Statements</h1><p class="subtitle" style="margin:0">${doc.display_name || doc.name}</p></div>
+      <a href="/logout" class="btn btn-outline">Logout</a>
+    </div>
+    <div class="card" style="padding:0;overflow-x:auto">
+      <table>
+        <thead><tr><th>Month</th><th>Centre</th><th>Pool</th><th>Gross</th><th>TDS</th><th>Net Payout</th><th>Status</th><th>UTR</th><th>Statement</th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="9" style="text-align:center;padding:24px;color:#a0aec0">No settlements found yet.</td></tr>'}</tbody>
+      </table>
+    </div>
+  `;
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>My Statements — MedPay</title>
+  ${CSS}
+</head>
+<body>
+  <nav class="nav">
+    <a href="/portal" class="nav-brand">Med<span>Pay</span></a>
+    <a href="/portal" class="active">My Statements</a>
+    <a href="/logout" style="margin-left:auto; color:#fc8181;">Logout</a>
+  </nav>
+  <div class="container">${body}</div>
 </body>
 </html>`;
 }
@@ -2501,7 +2567,31 @@ export default {
       return handleApi(request, env, path);
     }
 
-    // Page routes
+    // Doctor portal — non-admin doctors can only access /portal and /statement
+    if (auth.role === 'doctor') {
+      let html;
+      try {
+        if (path === '/portal' || path === '/') {
+          html = await doctorPortalPage(env, auth.doctorId);
+        } else if (path.match(/^\/statement\/(\d+)$/)) {
+          const id = parseInt(path.match(/^\/statement\/(\d+)$/)[1]);
+          // Verify this statement belongs to this doctor
+          const s = await env.DB.prepare('SELECT doctor_id FROM monthly_settlements WHERE id = ?').bind(id).first();
+          if (s && s.doctor_id === auth.doctorId) {
+            html = await statementPage(env, id);
+          } else {
+            html = doctorPortalPage(env, auth.doctorId);
+          }
+        } else {
+          return new Response(null, { status: 302, headers: { 'Location': '/portal' } });
+        }
+      } catch (e) {
+        html = `<html><body><h1>Error</h1><pre>${e.stack || e.message}</pre></body></html>`;
+      }
+      return new Response(html, { headers: { 'Content-Type': 'text/html' } });
+    }
+
+    // Admin page routes
     let html;
     try {
       if (path === '/' || path === '/dashboard') {
