@@ -120,6 +120,8 @@ function htmlShell(title, navActive, bodyContent, scriptContent = '') {
     <a href="/calc" class="${navActive === 'calc' ? 'active' : ''}">Calculator</a>
     <a href="/doctors" class="${navActive === 'doctors' ? 'active' : ''}">Doctors</a>
     <a href="/settlements" class="${navActive === 'settlements' ? 'active' : ''}">Settlements</a>
+    <a href="/adjustments" class="${navActive === 'adjustments' ? 'active' : ''}">Adjustments</a>
+    <a href="/month-end" class="${navActive === 'monthend' ? 'active' : ''}">Month-End</a>
     <a href="/aliases" class="${navActive === 'aliases' ? 'active' : ''}">Aliases</a>
     <a href="/logout" style="margin-left:auto; color:#fc8181;">Logout</a>
   </nav>
@@ -291,6 +293,7 @@ async function doctorsListPage(env) {
   const body = `
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:24px">
       <div><h1>Doctors</h1><p class="subtitle" style="margin:0">Manage doctors and contracts</p></div>
+      <a href="/doctors/import" class="btn btn-outline" style="margin-right:8px">Import CSV</a>
       <a href="/doctors/add" class="btn btn-primary">+ Add Doctor</a>
     </div>
     <div class="card" style="padding:0;overflow-x:auto">
@@ -1499,19 +1502,36 @@ function displayResults(results) {
 
   document.getElementById('resultCards').innerHTML = html;
 
-  // Update flags tab
+  // Update flags tab with auto-alias mapping
   var flagsHtml = '';
-  if (allFlags.length + flagCount > 0) {
-    flagsHtml = '<table><thead><tr><th>Bill No</th><th>Doctor</th><th>Reason</th></tr></thead><tbody>';
+  if (allFlags.length > 0) {
+    // Group by unique unknown doctor name
+    var unknownDocs = {};
     allFlags.forEach(function(f) {
-      flagsHtml += '<tr><td>' + f.bill.billNo + '</td><td>' + f.bill.consultDoctor + '</td><td>' + f.reason + '</td></tr>';
+      var name = f.bill.consultDoctor;
+      if (!unknownDocs[name]) unknownDocs[name] = { name: name, count: 0 };
+      unknownDocs[name].count++;
     });
-    results.forEach(function(r) {
-      r.billFlags.forEach(function(bf) {
-        flagsHtml += '<tr><td>' + bf.bill.billNo + '</td><td>' + bf.bill.consultDoctor + '</td><td>' + bf.flagReason + '</td></tr>';
-      });
+    var unknownList = Object.values(unknownDocs).sort(function(a, b) { return b.count - a.count; });
+
+    var docOptions = '<option value="">— Skip —</option>';
+    DOC_DATA.doctors.forEach(function(d) {
+      docOptions += '<option value="' + d.id + '">' + (d.display_name || d.name) + '</option>';
     });
-    flagsHtml += '</tbody></table>';
+
+    flagsHtml = '<p style="margin-bottom:12px;font-size:14px"><strong>' + unknownList.length + ' unknown doctor name(s)</strong> found in ' + allFlags.length + ' bills. Map them below and re-process.</p>';
+    flagsHtml += '<div id="aliasMapRows">';
+    unknownList.forEach(function(u, i) {
+      flagsHtml += '<div style="display:grid;grid-template-columns:1fr 1fr 60px;gap:8px;align-items:center;margin-bottom:8px;padding:8px 12px;background:#f7fafc;border-radius:6px">' +
+        '<div><strong>' + u.name + '</strong><span style="color:#a0aec0;font-size:12px;margin-left:8px">(' + u.count + ' bills)</span></div>' +
+        '<select class="alias-map-select" data-ecw-name="' + u.name.replace(/"/g, '&quot;') + '" style="padding:8px;border:1px solid #e2e8f0;border-radius:6px">' + docOptions + '</select>' +
+        '<span class="alias-map-status" style="font-size:12px;color:#a0aec0">—</span>' +
+        '</div>';
+    });
+    flagsHtml += '</div>';
+    flagsHtml += '<div style="margin-top:16px;display:flex;gap:8px"><button class="btn btn-primary" onclick="saveAliasesAndReprocess()">Save Aliases & Re-process</button><button class="btn btn-outline" onclick="saveAliasesOnly()">Save Aliases Only</button></div>';
+  } else if (flagCount > 0) {
+    flagsHtml = '<p style="color:#ed8936">' + flagCount + ' flagged bills (contract issues). Check individual doctor cards.</p>';
   } else {
     flagsHtml = '<p style="color:#48bb78">No flags. All bills processed cleanly.</p>';
   }
@@ -1678,6 +1698,46 @@ function exportResultsCSV() {
   a.href = URL.createObjectURL(blob);
   a.download = 'medpay_' + document.getElementById('calc_month').value + '.csv';
   a.click();
+}
+
+// ============ AUTO-ALIAS FROM FLAGS ============
+async function saveAliasesOnly() {
+  var selects = document.querySelectorAll('.alias-map-select');
+  var saved = 0, errors = 0;
+  for (var i = 0; i < selects.length; i++) {
+    var sel = selects[i];
+    var docId = sel.value;
+    var ecwName = sel.getAttribute('data-ecw-name');
+    var statusEl = sel.parentElement.querySelector('.alias-map-status');
+    if (!docId) { statusEl.textContent = 'Skipped'; statusEl.style.color = '#a0aec0'; continue; }
+    try {
+      var r = await fetch('/api/aliases', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ alias: ecwName, doctor_id: parseInt(docId) }) });
+      if (r.ok) {
+        saved++;
+        statusEl.textContent = '\\u2713 Saved';
+        statusEl.style.color = '#276749';
+        // Update local alias map so re-process works without page reload
+        var norm = ecwName.toLowerCase().replace(/\\./g, '').replace(/\\s+/g, ' ').trim().replace(/\\s*health\\s*one\\s*team$/i, '').replace(/\\s*healthone\\s*team$/i, '').replace(/\\s*healthone$/i, '').replace(/\\s*health\\s*one$/i, '').trim();
+        DOC_DATA.aliasMap[norm] = parseInt(docId);
+      } else {
+        errors++;
+        var errText = await r.text();
+        statusEl.textContent = '\\u2717 ' + (errText.indexOf('duplicate') >= 0 ? 'Exists' : 'Error');
+        statusEl.style.color = errText.indexOf('duplicate') >= 0 ? '#ed8936' : '#c53030';
+      }
+    } catch(ex) {
+      errors++;
+      statusEl.textContent = '\\u2717 Failed';
+      statusEl.style.color = '#c53030';
+    }
+  }
+  toast(saved + ' alias(es) saved' + (errors > 0 ? ', ' + errors + ' error(s)' : ''));
+}
+
+async function saveAliasesAndReprocess() {
+  await saveAliasesOnly();
+  // Small delay then re-process
+  setTimeout(function() { processCSV(); }, 500);
 }
 
 // ============ SAVE SETTLEMENTS ============
@@ -1966,6 +2026,217 @@ async function savePayment() {
   return htmlShell('Settlements', 'settlements', body, script);
 }
 
+// ===================== PAGE: Bulk Import =====================
+async function bulkImportPage(env) {
+  const doctors = (await env.DB.prepare('SELECT id, name, display_name FROM doctors ORDER BY name').all()).results || [];
+  const docOpts = doctors.map(d => `<option value="${d.id}">${d.display_name || d.name}</option>`).join('');
+
+  const body = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:24px">
+      <div><h1>Bulk Doctor Import</h1><p class="subtitle" style="margin:0">Import multiple doctors from CSV</p></div>
+      <a href="/doctors" class="btn btn-outline">← Back</a>
+    </div>
+    <div class="card">
+      <h3>Step 1 — Download Template</h3>
+      <p style="font-size:13px;color:#718096;margin-bottom:12px">Download the CSV template, fill in doctor details, and upload below.</p>
+      <button class="btn btn-primary btn-sm" onclick="downloadTemplate()">Download CSV Template</button>
+    </div>
+    <div class="card">
+      <h3>Step 2 — Upload Filled CSV</h3>
+      <div class="upload-zone" id="importDropZone" onclick="document.getElementById('importFile').click()" style="margin-top:12px">
+        <input type="file" id="importFile" accept=".csv" style="display:none" onchange="handleImportFile(this.files[0])">
+        <div style="font-size:36px;margin-bottom:8px">📋</div>
+        <div style="font-size:16px;font-weight:600;color:#2d3748">Drop CSV here or click to browse</div>
+      </div>
+      <div id="importPreview" class="hidden" style="margin-top:16px"></div>
+      <div id="importActions" class="hidden" style="margin-top:16px;text-align:right">
+        <button class="btn btn-primary" onclick="executeImport()">Import All Doctors</button>
+      </div>
+    </div>
+    <div id="importResults" class="hidden" style="margin-top:16px"></div>
+  `;
+
+  const script = `<script>
+function downloadTemplate() {
+  var headers = ['name','display_name','pin','centres','contract_type','mgm_amount','threshold_amount','incentive_pct','retainer_pool_pct','cash_base_method','cash_b_pct','cash_self_pct','cash_other_pct','tpa_base_method','tpa_b_pct','tpa_self_pct','tpa_other_pct','pmjay_base_method','pmjay_pct','pmjay_in_mgm_pool','govt_base_method','govt_b_pct','govt_self_pct','govt_other_pct','opd_non_govt_pct','opd_govt_pct','tds_rate','rb_hospital_fixed','rb_includes_robotic','effective_date','notes','aliases'];
+  var example = ['Dr. Example Name','Dr. Example','2001','Shilaj','MGM','150000','225000','80','','A','','100','80','A','','100','80','na','','0','A','','100','100','80','100','10','','0','2026-01-01','Neurology specialist','dr example; dr example name'];
+  var csv = headers.join(',') + '\\n' + example.join(',');
+  var blob = new Blob([csv], { type: 'text/csv' });
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'medpay_doctor_import_template.csv';
+  a.click();
+}
+
+var importData = [];
+
+function handleImportFile(file) {
+  if (!file) return;
+  var reader = new FileReader();
+  reader.onload = function(e) {
+    var lines = e.target.result.split('\\n');
+    if (lines.length < 2) { alert('CSV must have header + at least 1 data row'); return; }
+    var headers = lines[0].split(',').map(function(h) { return h.trim().replace(/"/g, ''); });
+    importData = [];
+    for (var i = 1; i < lines.length; i++) {
+      if (!lines[i].trim()) continue;
+      var cells = lines[i].split(',').map(function(c) { return c.trim().replace(/^"|"$/g, ''); });
+      var row = {};
+      headers.forEach(function(h, j) { row[h] = cells[j] || ''; });
+      if (row.name) importData.push(row);
+    }
+    var preview = document.getElementById('importPreview');
+    preview.classList.remove('hidden');
+    preview.innerHTML = '<h3>' + importData.length + ' doctor(s) found</h3><table style="font-size:12px"><thead><tr><th>Name</th><th>Type</th><th>MGM</th><th>Centres</th><th>TDS</th></tr></thead><tbody>' +
+      importData.map(function(r) { return '<tr><td>' + r.name + '</td><td>' + r.contract_type + '</td><td>' + (r.mgm_amount || '\\u2014') + '</td><td>' + (r.centres || '') + '</td><td>' + (r.tds_rate || '10') + '%</td></tr>'; }).join('') +
+      '</tbody></table>';
+    document.getElementById('importActions').classList.remove('hidden');
+  };
+  reader.readAsText(file);
+}
+
+async function executeImport() {
+  if (importData.length === 0) return;
+  var results = document.getElementById('importResults');
+  results.classList.remove('hidden');
+  results.innerHTML = '<div class="loader"></div> Importing...';
+  var ok = 0, fail = 0, log = '';
+
+  for (var i = 0; i < importData.length; i++) {
+    var r = importData[i];
+    var payload = {
+      doctor: { name: r.name, display_name: r.display_name || null, pin: r.pin || null },
+      contract: {
+        contract_type: r.contract_type || 'FFS',
+        mgm_amount: parseFloat(r.mgm_amount) || null,
+        threshold_amount: parseFloat(r.threshold_amount) || null,
+        incentive_pct: parseFloat(r.incentive_pct) || null,
+        retainer_pool_pct: parseFloat(r.retainer_pool_pct) || null,
+        cash_base_method: r.cash_base_method || null,
+        cash_b_pct: parseFloat(r.cash_b_pct) || null,
+        cash_self_pct: parseFloat(r.cash_self_pct) || null,
+        cash_other_pct: parseFloat(r.cash_other_pct) || null,
+        tpa_base_method: r.tpa_base_method || null,
+        tpa_b_pct: parseFloat(r.tpa_b_pct) || null,
+        tpa_self_pct: parseFloat(r.tpa_self_pct) || null,
+        tpa_other_pct: parseFloat(r.tpa_other_pct) || null,
+        pmjay_base_method: r.pmjay_base_method || null,
+        pmjay_pct: parseFloat(r.pmjay_pct) || null,
+        pmjay_in_mgm_pool: parseInt(r.pmjay_in_mgm_pool) || 0,
+        govt_base_method: r.govt_base_method || null,
+        govt_b_pct: parseFloat(r.govt_b_pct) || null,
+        govt_self_pct: parseFloat(r.govt_self_pct) || null,
+        govt_other_pct: parseFloat(r.govt_other_pct) || null,
+        opd_non_govt_pct: parseFloat(r.opd_non_govt_pct) || null,
+        opd_govt_pct: parseFloat(r.opd_govt_pct) || null,
+        tds_rate: parseFloat(r.tds_rate) || 10,
+        rb_hospital_fixed: parseFloat(r.rb_hospital_fixed) || null,
+        rb_includes_robotic: parseInt(r.rb_includes_robotic) || 0,
+        notes: r.notes || null,
+        effective_date: r.effective_date || null
+      },
+      packages: [],
+      aliases: r.aliases ? r.aliases.split(';').map(function(a) { return a.trim(); }).filter(Boolean) : [],
+      centres: r.centres ? r.centres.split(';').map(function(c) { return c.trim(); }).filter(Boolean) : []
+    };
+
+    try {
+      var resp = await fetch('/api/doctors', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+      if (resp.ok) {
+        ok++;
+        log += '<tr style="color:#276749"><td>' + r.name + '</td><td>\\u2713 Created</td></tr>';
+      } else {
+        fail++;
+        var err = await resp.text();
+        log += '<tr style="color:#c53030"><td>' + r.name + '</td><td>\\u2717 ' + err.substring(0, 60) + '</td></tr>';
+      }
+    } catch(ex) {
+      fail++;
+      log += '<tr style="color:#c53030"><td>' + r.name + '</td><td>\\u2717 ' + ex.message + '</td></tr>';
+    }
+  }
+  results.innerHTML = '<div class="card"><h3>Import Complete: ' + ok + ' created, ' + fail + ' failed</h3><table style="font-size:13px">' + log + '</table>' + (ok > 0 ? '<br><a href="/doctors" class="btn btn-primary btn-sm">View Doctors</a>' : '') + '</div>';
+}
+</script>`;
+
+  return htmlShell('Bulk Import', 'doctors', body, script);
+}
+
+// ===================== PAGE: Month-End Dashboard =====================
+async function monthEndPage(env) {
+  const centres = ['Shilaj', 'Vastral', 'Modasa', 'Gandhinagar', 'Udaipur'];
+  const now = new Date();
+  const currentMonth = now.toISOString().slice(0, 7);
+
+  // Get last 3 months
+  const months = [];
+  for (let i = 0; i < 3; i++) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    months.push(d.toISOString().slice(0, 7));
+  }
+
+  // Query all settlements for these months
+  const allSettlements = (await env.DB.prepare('SELECT ms.*, d.name as doctor_name FROM monthly_settlements ms JOIN doctors d ON d.id = ms.doctor_id WHERE ms.month IN (?, ?, ?) ORDER BY ms.month DESC').bind(months[0], months[1], months[2]).all()).results || [];
+  const totalDoctors = (await env.DB.prepare('SELECT COUNT(*) as cnt FROM doctors WHERE active = 1').first()).cnt || 0;
+
+  let gridHtml = '';
+  for (const month of months) {
+    const monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const [y, m] = month.split('-');
+    const label = monthNames[parseInt(m) - 1] + ' ' + y;
+
+    let centreCards = '';
+    for (const centre of centres) {
+      const cs = allSettlements.filter(s => s.month === month && s.centre === centre);
+      const drafted = cs.filter(s => !s.locked).length;
+      const locked = cs.filter(s => s.locked && !s.payment_utr).length;
+      const paid = cs.filter(s => !!s.payment_utr).length;
+      const totalPayout = cs.reduce((sum, s) => sum + (s.final_payout || 0), 0);
+      const totalNet = cs.reduce((sum, s) => sum + (s.net_payout || s.final_payout * 0.9 || 0), 0);
+      const total = cs.length;
+
+      let statusColor = '#e2e8f0';
+      if (total > 0 && paid === total) statusColor = '#48bb78';
+      else if (locked > 0 || paid > 0) statusColor = '#ed8936';
+      else if (drafted > 0) statusColor = '#4299e1';
+
+      centreCards += `<div class="card" style="padding:16px;border-top:3px solid ${statusColor}">
+        <div style="font-weight:700;font-size:14px;color:#1a365d">${centre}</div>
+        <div style="font-size:22px;font-weight:700;color:#276749;margin:4px 0">${fmtRs(totalNet)}</div>
+        <div style="font-size:12px;color:#718096">Gross: ${fmtRs(totalPayout)}</div>
+        <div style="margin-top:8px;display:flex;gap:4px;flex-wrap:wrap">
+          ${drafted > 0 ? `<span class="badge badge-inactive">${drafted} Draft</span>` : ''}
+          ${locked > 0 ? `<span class="badge" style="background:#fefcbf;color:#975a16">${locked} Locked</span>` : ''}
+          ${paid > 0 ? `<span class="badge badge-active">${paid} Paid</span>` : ''}
+          ${total === 0 ? `<span class="badge" style="background:#f0f0f0;color:#a0aec0">No data</span>` : ''}
+        </div>
+        <div style="font-size:11px;color:#a0aec0;margin-top:4px">${total} of ${totalDoctors} doctors</div>
+      </div>`;
+    }
+
+    const monthTotal = allSettlements.filter(s => s.month === month);
+    const monthGross = monthTotal.reduce((sum, s) => sum + (s.final_payout || 0), 0);
+    const monthNet = monthTotal.reduce((sum, s) => sum + (s.net_payout || s.final_payout * 0.9 || 0), 0);
+    const monthPaid = monthTotal.filter(s => !!s.payment_utr).length;
+
+    gridHtml += `
+      <div style="margin-bottom:32px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+          <h2 style="margin:0">${label}</h2>
+          <div style="font-size:14px;color:#4a5568">Gross: <strong>${fmtRs(monthGross)}</strong> | Net: <strong style="color:#276749">${fmtRs(monthNet)}</strong> | ${monthPaid}/${monthTotal.length} paid</div>
+        </div>
+        <div class="stat-grid" style="grid-template-columns:repeat(5,1fr)">${centreCards}</div>
+      </div>`;
+  }
+
+  const body = `
+    <h1>Month-End Dashboard</h1>
+    <p class="subtitle">Settlement status across all centres</p>
+    ${gridHtml}
+  `;
+  return htmlShell('Month-End', 'dash', body);
+}
+
 // ===================== PAGE: Aliases =====================
 async function aliasesPage(env) {
   const aliases = (await env.DB.prepare('SELECT da.*, d.name as doctor_name, d.display_name FROM doctor_aliases da JOIN doctors d ON d.id = da.doctor_id ORDER BY da.alias').all()).results || [];
@@ -2237,7 +2508,153 @@ async function handleApi(request, env, path) {
     return Response.json({ settlement, contract, bills });
   }
 
+  // ---- ADJUSTMENTS ----
+  if (path === '/api/adjustments' && method === 'GET') {
+    const doctorId = new URL(request.url).searchParams.get('doctor_id');
+    const month = new URL(request.url).searchParams.get('month');
+    let q = 'SELECT a.*, d.name as doctor_name, d.display_name FROM adjustments a JOIN doctors d ON d.id = a.doctor_id WHERE 1=1';
+    const p = [];
+    if (doctorId) { q += ' AND a.doctor_id = ?'; p.push(parseInt(doctorId)); }
+    if (month) { q += ' AND a.month = ?'; p.push(month); }
+    q += ' ORDER BY a.month DESC, d.name';
+    let stmt = env.DB.prepare(q);
+    if (p.length > 0) stmt = stmt.bind(...p);
+    const adj = (await stmt.all()).results;
+    return Response.json(adj);
+  }
+
+  if (path === '/api/adjustments' && method === 'POST') {
+    if (!json) return new Response('No data', { status: 400 });
+    await env.DB.prepare('INSERT INTO adjustments (doctor_id, month, type, description, amount) VALUES (?, ?, ?, ?, ?)').bind(
+      json.doctor_id, json.month, json.type, json.description, json.amount
+    ).run();
+    return Response.json({ success: true });
+  }
+
+  const adjDelMatch = path.match(/^\/api\/adjustments\/(\d+)$/);
+  if (adjDelMatch && method === 'DELETE') {
+    await env.DB.prepare('DELETE FROM adjustments WHERE id = ?').bind(parseInt(adjDelMatch[1])).run();
+    return Response.json({ success: true });
+  }
+
   return new Response('Not found', { status: 404 });
+}
+
+// ===================== PAGE: Adjustments =====================
+async function adjustmentsPage(env, searchParams) {
+  const doctors = (await env.DB.prepare('SELECT id, name, display_name FROM doctors WHERE active = 1 ORDER BY name').all()).results || [];
+  const month = searchParams.get('month') || new Date().toISOString().slice(0, 7);
+  const doctorId = searchParams.get('doctor_id') || '';
+
+  let query = 'SELECT a.*, d.name as doctor_name, d.display_name FROM adjustments a JOIN doctors d ON d.id = a.doctor_id WHERE 1=1';
+  const params = [];
+  if (month) { query += ' AND a.month = ?'; params.push(month); }
+  if (doctorId) { query += ' AND a.doctor_id = ?'; params.push(parseInt(doctorId)); }
+  query += ' ORDER BY d.name, a.type';
+
+  let stmt = env.DB.prepare(query);
+  if (params.length > 0) stmt = stmt.bind(...params);
+  const adjustments = (await stmt.all()).results || [];
+
+  const docOptions = doctors.map(d => `<option value="${d.id}" ${d.id == doctorId ? 'selected' : ''}>${d.display_name || d.name}</option>`).join('');
+
+  let totalAdv = 0, totalDed = 0;
+  let rows = '';
+  for (const a of adjustments) {
+    const isPositive = a.amount > 0;
+    if (isPositive) totalAdv += a.amount; else totalDed += Math.abs(a.amount);
+    rows += `<tr>
+      <td>${a.display_name || a.doctor_name}</td>
+      <td>${a.month}</td>
+      <td><span class="badge ${isPositive ? 'badge-active' : 'badge-inactive'}">${a.type}</span></td>
+      <td>${a.description || '—'}</td>
+      <td style="font-weight:600;color:${isPositive ? '#276749' : '#c53030'}">${isPositive ? '+' : ''}${fmtRs(a.amount)}</td>
+      <td><button class="btn btn-danger btn-sm" onclick="deleteAdj(${a.id})">Delete</button></td>
+    </tr>`;
+  }
+
+  const body = `
+    <h1>Adjustments & Deductions</h1>
+    <p class="subtitle">Advances, deductions, recoveries — applied to net payout</p>
+
+    <div class="card">
+      <h3>Add Adjustment</h3>
+      <div class="form-row">
+        <div class="form-group"><label>Doctor *</label><select id="adj_doctor">${docOptions}</select></div>
+        <div class="form-group"><label>Month *</label><input type="month" id="adj_month" value="${month}"></div>
+        <div class="form-group"><label>Type *</label>
+          <select id="adj_type">
+            <option value="Advance">Advance (deduct from payout)</option>
+            <option value="Recovery">Recovery (deduct from payout)</option>
+            <option value="Deduction">Other Deduction</option>
+            <option value="Bonus">Bonus (add to payout)</option>
+            <option value="Reimbursement">Reimbursement (add to payout)</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label>Amount (Rs.) *</label><input type="number" id="adj_amount" step="0.01" placeholder="Positive = add, Negative = deduct"></div>
+        <div class="form-group"><label>Description</label><input type="text" id="adj_desc" placeholder="e.g. Equipment EMI, Prior month adjustment"></div>
+        <div class="form-group" style="align-self:end"><button class="btn btn-primary" onclick="addAdj()">Add</button></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="form-row" style="margin-bottom:16px">
+        <div class="form-group"><label>Filter Month</label><input type="month" id="filter_adj_month" value="${month}" onchange="applyAdjFilter()"></div>
+        <div class="form-group"><label>Filter Doctor</label>
+          <select id="filter_adj_doctor" onchange="applyAdjFilter()">
+            <option value="">All Doctors</option>
+            ${docOptions}
+          </select>
+        </div>
+      </div>
+      <div class="stat-grid" style="grid-template-columns:1fr 1fr;margin-bottom:16px">
+        <div class="stat-card"><div class="label">Total Additions</div><div class="value" style="color:#276749">+ ${fmtRs(totalAdv)}</div></div>
+        <div class="stat-card"><div class="label">Total Deductions</div><div class="value" style="color:#c53030">- ${fmtRs(totalDed)}</div></div>
+      </div>
+      <div style="overflow-x:auto">
+        <table>
+          <thead><tr><th>Doctor</th><th>Month</th><th>Type</th><th>Description</th><th>Amount</th><th>Actions</th></tr></thead>
+          <tbody>${rows || '<tr><td colspan="6" style="text-align:center;padding:24px;color:#a0aec0">No adjustments found.</td></tr>'}</tbody>
+        </table>
+      </div>
+    </div>
+  `;
+
+  const script = `<script>
+function applyAdjFilter() {
+  var m = document.getElementById('filter_adj_month').value;
+  var d = document.getElementById('filter_adj_doctor').value;
+  var params = new URLSearchParams();
+  if (m) params.set('month', m);
+  if (d) params.set('doctor_id', d);
+  window.location.href = '/adjustments' + (params.toString() ? '?' + params.toString() : '');
+}
+
+async function addAdj() {
+  var docId = document.getElementById('adj_doctor').value;
+  var month = document.getElementById('adj_month').value;
+  var type = document.getElementById('adj_type').value;
+  var amount = parseFloat(document.getElementById('adj_amount').value);
+  var desc = document.getElementById('adj_desc').value.trim();
+  if (!docId || !month || !amount) { alert('Doctor, month and amount are required'); return; }
+  // Auto-negate deductions
+  if (['Advance','Recovery','Deduction'].indexOf(type) >= 0 && amount > 0) amount = -amount;
+  var r = await fetch('/api/adjustments', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ doctor_id: parseInt(docId), month: month, type: type, description: desc, amount: amount }) });
+  if (r.ok) location.reload();
+  else alert('Error: ' + (await r.text()));
+}
+
+async function deleteAdj(id) {
+  if (!confirm('Delete this adjustment?')) return;
+  var r = await fetch('/api/adjustments/' + id, { method: 'DELETE' });
+  if (r.ok) location.reload();
+  else alert('Error: ' + (await r.text()));
+}
+</script>`;
+
+  return htmlShell('Adjustments', 'settlements', body, script);
 }
 
 // ===================== PAGE: Payout Statement =====================
@@ -2247,6 +2664,8 @@ async function statementPage(env, settlementId) {
 
   const contract = await env.DB.prepare('SELECT * FROM contracts WHERE doctor_id = ?').bind(settlement.doctor_id).first();
   const bills = (await env.DB.prepare('SELECT * FROM bill_calculations WHERE settlement_id = ? ORDER BY bill_date, bill_no').bind(settlementId).all()).results || [];
+  const adjustments = (await env.DB.prepare('SELECT * FROM adjustments WHERE doctor_id = ? AND month = ? ORDER BY type').bind(settlement.doctor_id, settlement.month).all()).results || [];
+  const totalAdj = adjustments.reduce((sum, a) => sum + (a.amount || 0), 0);
 
   // Split IPD vs OPD, group IPD by bill_no (1 line per patient)
   let ipdMap = {};
@@ -2314,8 +2733,16 @@ async function statementPage(env, settlementId) {
       <tr style="font-weight:700"><td>Gross Payout</td><td style="text-align:right">${fmtRs(payout)}</td></tr>`;
   }
   // TDS rows always
-  calcRows += `<tr style="color:#c53030"><td>Less: TDS @ ${tdsRate}%</td><td style="text-align:right">- ${fmtRs(tdsAmt)}</td></tr>
-    <tr style="font-weight:700;font-size:16px;background:#ebf4ff"><td>Net Payout</td><td style="text-align:right;color:#276749">${fmtRs(netPayout)}</td></tr>`;
+  calcRows += `<tr style="color:#c53030"><td>Less: TDS @ ${tdsRate}%</td><td style="text-align:right">- ${fmtRs(tdsAmt)}</td></tr>`;
+  // Adjustments
+  if (adjustments.length > 0) {
+    for (const adj of adjustments) {
+      const isNeg = adj.amount < 0;
+      calcRows += `<tr style="color:${isNeg ? '#c53030' : '#276749'}"><td>${isNeg ? 'Less' : 'Add'}: ${adj.type}${adj.description ? ' — ' + adj.description : ''}</td><td style="text-align:right">${isNeg ? '- ' : '+ '}${fmtRs(Math.abs(adj.amount))}</td></tr>`;
+    }
+  }
+  const finalNet = netPayout + totalAdj;
+  calcRows += `<tr style="font-weight:700;font-size:16px;background:#ebf4ff"><td>Net Payable</td><td style="text-align:right;color:#276749">${fmtRs(finalNet)}</td></tr>`;
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -2436,7 +2863,7 @@ async function statementPage(env, settlementId) {
           <tr><td>Bank</td><td>${settlement.payment_bank || '—'}</td></tr>
           <tr><td>Gross Amount</td><td>${fmtRs(payout)}</td></tr>
           <tr><td>TDS Deducted (${tdsRate}%)</td><td style="color:#c53030">- ${fmtRs(tdsAmt)}</td></tr>
-          <tr><td style="font-weight:700">Net Amount Paid</td><td style="font-weight:700;font-size:16px;color:#276749">${fmtRs(netPayout)}</td></tr>
+          <tr><td style="font-weight:700">Net Amount Paid</td><td style="font-weight:700;font-size:16px;color:#276749">${fmtRs(netPayout + totalAdj)}</td></tr>
         </table>
       </div>` : ''}
 
@@ -2613,6 +3040,8 @@ export default {
         html = await doctorsListPage(env);
       } else if (path === '/doctors/add') {
         html = await doctorFormPage(env);
+      } else if (path === '/doctors/import') {
+        html = await bulkImportPage(env);
       } else if (path.match(/^\/doctors\/edit\/(\d+)$/)) {
         const id = parseInt(path.match(/^\/doctors\/edit\/(\d+)$/)[1]);
         html = await doctorFormPage(env, id);
@@ -2620,6 +3049,10 @@ export default {
         html = await settlementsPage(env, url.searchParams);
       } else if (path === '/aliases') {
         html = await aliasesPage(env);
+      } else if (path === '/month-end') {
+        html = await monthEndPage(env);
+      } else if (path === '/adjustments') {
+        html = await adjustmentsPage(env, url.searchParams);
       } else if (path.match(/^\/statement\/(\d+)$/)) {
         const id = parseInt(path.match(/^\/statement\/(\d+)$/)[1]);
         html = await statementPage(env, id);

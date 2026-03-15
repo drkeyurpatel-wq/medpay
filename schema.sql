@@ -103,3 +103,14 @@ CREATE TABLE IF NOT EXISTS bill_calculations (
   flagged INTEGER DEFAULT 0,
   flag_reason TEXT
 );
+
+-- Adjustments / deductions / advances per doctor per month
+CREATE TABLE IF NOT EXISTS adjustments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  doctor_id INTEGER NOT NULL REFERENCES doctors(id),
+  month TEXT NOT NULL,
+  type TEXT NOT NULL,
+  description TEXT,
+  amount REAL NOT NULL,
+  created_at TEXT DEFAULT (datetime('now'))
+);
