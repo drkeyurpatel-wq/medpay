@@ -82,9 +82,6 @@ const CSS = `
   .upload-zone:hover { border-color: #2b6cb0; background: #ebf8ff; }
   .upload-zone.dragover { border-color: #2b6cb0; background: #ebf8ff; }
   .hidden { display: none !important; }
-  .tab-bar { display: flex; gap: 4px; margin-bottom: 20px; border-bottom: 2px solid #e2e8f0; padding-bottom: 0; }
-  .tab { padding: 10px 20px; font-size: 14px; font-weight: 600; color: #718096; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -2px; transition: all 0.2s; }
-  .tab.active { color: #2b6cb0; border-bottom-color: #2b6cb0; }
   .pkg-row { display: grid; grid-template-columns: 1fr 150px 40px; gap: 8px; align-items: end; margin-bottom: 8px; }
   .alias-row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
   .loader { display: inline-block; width: 20px; height: 20px; border: 3px solid #e2e8f0; border-top-color: #2b6cb0; border-radius: 50%; animation: spin 0.6s linear infinite; }
@@ -125,9 +122,6 @@ function htmlShell(title, navActive, bodyContent, scriptContent = '') {
     <a href="/calc" class="${navActive === 'calc' ? 'active' : ''}">Calculator</a>
     <a href="/doctors" class="${navActive === 'doctors' ? 'active' : ''}">Doctors</a>
     <a href="/settlements" class="${navActive === 'settlements' ? 'active' : ''}">Settlements</a>
-    <a href="/adjustments" class="${navActive === 'adjustments' ? 'active' : ''}">Adjustments</a>
-    <a href="/month-end" class="${navActive === 'monthend' ? 'active' : ''}">Month-End</a>
-    <a href="/aliases" class="${navActive === 'aliases' ? 'active' : ''}">Aliases</a>
     <a href="/logout" style="margin-left:auto; color:#fc8181;">Logout</a>
   </nav>
   <div class="container">
@@ -274,51 +268,7 @@ async function loadDoctorData(env) {
 
 // ===================== PAGE: Dashboard =====================
 async function dashboardPage(env) {
-  const data = await loadDoctorData(env);
-  const totalDoctors = data.doctors.filter(d => d.active).length;
-  const settlements = (await env.DB.prepare('SELECT * FROM monthly_settlements ORDER BY month DESC, centre LIMIT 50').all()).results || [];
-
-  // Latest month stats
-  const latestMonth = settlements.length > 0 ? settlements[0].month : 'N/A';
-  let totalPayout = 0;
-  let monthSettlements = settlements.filter(s => s.month === latestMonth);
-  for (const s of monthSettlements) totalPayout += (s.final_payout || 0);
-
-  const centres = ['Shilaj', 'Vastral', 'Modasa', 'Gandhinagar', 'Udaipur'];
-  let centreCards = '';
-  for (const c of centres) {
-    const cs = monthSettlements.filter(s => s.centre === c);
-    const cp = cs.reduce((sum, s) => sum + (s.final_payout || 0), 0);
-    const dc = cs.length;
-    centreCards += `<div class="stat-card"><div class="label">${c}</div><div class="value">${fmtRs(cp)}</div><div class="sub">${dc} doctor${dc !== 1 ? 's' : ''} settled</div></div>`;
-  }
-
-  const body = `
-    <h1>Dashboard</h1>
-    <p class="subtitle">MedPay — Doctor Payout Management</p>
-    <div class="stat-grid">
-      <div class="stat-card"><div class="label">Active Doctors</div><div class="value">${totalDoctors}</div><div class="sub">Registered in system</div></div>
-      <div class="stat-card"><div class="label">Latest Month</div><div class="value">${latestMonth}</div><div class="sub">Most recent settlements</div></div>
-      <div class="stat-card"><div class="label">Total Payout</div><div class="value">${fmtRs(totalPayout)}</div><div class="sub">For ${latestMonth}</div></div>
-      <div class="stat-card"><div class="label">Contract Types</div><div class="value">${Object.keys(data.contractMap).length}</div><div class="sub">Configured contracts</div></div>
-    </div>
-    <h2>Centre-wise (${latestMonth})</h2>
-    <div class="stat-grid">${centreCards}</div>
-    <div class="card">
-      <div class="card-header"><div class="card-title">Recent Settlements</div></div>
-      <table>
-        <thead><tr><th class="sortable">Month</th><th class="sortable">Centre</th><th class="sortable">Doctor</th><th class="sortable">Pool</th><th class="sortable">Payout</th><th>Status</th></tr></thead>
-        <tbody>
-          ${monthSettlements.length === 0 ? '<tr><td colspan="6" style="text-align:center;color:#a0aec0;padding:24px;">No settlements yet. Go to Calculator to process billing data.</td></tr>' : ''}
-          ${monthSettlements.map(s => {
-            const doc = data.doctors.find(d => d.id === s.doctor_id);
-            return `<tr><td>${s.month}</td><td>${s.centre}</td><td>${doc ? doc.display_name || doc.name : 'Unknown'}</td><td>${fmtRs(s.calculated_pool)}</td><td style="font-weight:700;color:#276749">${fmtRs(s.final_payout)}</td><td>${s.locked ? '<span class="badge badge-active">Locked</span>' : '<span class="badge badge-inactive">Draft</span>'}</td></tr>`;
-          }).join('')}
-        </tbody>
-      </table>
-    </div>
-  `;
-  return htmlShell('Dashboard', 'dash', body);
+  return monthEndPage(env);
 }
 
 // ===================== PAGE: Doctors List =====================
@@ -344,11 +294,17 @@ async function doctorsListPage(env) {
     </tr>`;
   }
 
+  // Load aliases for inline management
+  const allAliases = (await env.DB.prepare('SELECT da.*, d.name as doctor_name, d.display_name FROM doctor_aliases da JOIN doctors d ON d.id = da.doctor_id ORDER BY da.alias').all()).results || [];
+  const docOptions = data.doctors.map(d => `<option value="${d.id}">${d.display_name || d.name}</option>`).join('');
+
   const body = `
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:24px">
-      <div><h1>Doctors</h1><p class="subtitle" style="margin:0">Manage doctors and contracts</p></div>
-      <a href="/doctors/import" class="btn btn-outline" style="margin-right:8px">Import CSV</a>
-      <a href="/doctors/add" class="btn btn-primary">+ Add Doctor</a>
+      <div><h1>Doctors</h1><p class="subtitle" style="margin:0">${data.doctors.length} registered — ${data.doctors.filter(d => d.active).length} active</p></div>
+      <div class="btn-group">
+        <a href="/doctors/import" class="btn btn-outline">Import CSV</a>
+        <a href="/doctors/add" class="btn btn-primary">+ Add Doctor</a>
+      </div>
     </div>
     <div class="card" style="padding:0;overflow-x:auto">
       <table>
@@ -356,12 +312,41 @@ async function doctorsListPage(env) {
         <tbody>${rows || '<tr><td colspan="6" style="text-align:center;padding:24px;color:#a0aec0">No doctors registered. Click + Add Doctor to start.</td></tr>'}</tbody>
       </table>
     </div>
+    <div class="card" style="margin-top:24px">
+      <div class="card-header">
+        <div class="card-title">eCW Name Aliases (${allAliases.length})</div>
+      </div>
+      <div class="form-row" style="margin-bottom:16px">
+        <div class="form-group"><label>eCW Name</label><input type="text" id="new_alias" placeholder="Name as it appears in CSV"></div>
+        <div class="form-group"><label>Maps to</label><select id="new_alias_doc"><option value="">— Select Doctor —</option>${docOptions}</select></div>
+        <div class="form-group" style="align-self:end"><button class="btn btn-primary btn-sm" onclick="addAlias()">Add</button></div>
+      </div>
+      <div style="max-height:200px;overflow-y:auto">
+        <table style="font-size:13px">
+          <tbody>${allAliases.map(a => `<tr><td style="font-weight:600">${a.alias}</td><td style="color:#718096">→</td><td>${a.display_name || a.doctor_name}</td><td><button class="btn btn-danger btn-sm" style="padding:2px 8px;font-size:11px" onclick="deleteAlias(${a.id})">✕</button></td></tr>`).join('')}</tbody>
+        </table>
+      </div>
+    </div>
   `;
 
   const script = `<script>
 async function toggleActive(id, val) {
   if (!confirm(val ? 'Activate this doctor?' : 'Deactivate this doctor?')) return;
-  const r = await fetch('/api/doctors/' + id, { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify({active: val}) });
+  var r = await fetch('/api/doctors/' + id, { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify({active: val}) });
+  if (r.ok) location.reload();
+  else alert('Error: ' + (await r.text()));
+}
+async function addAlias() {
+  var alias = document.getElementById('new_alias').value.trim();
+  var docId = document.getElementById('new_alias_doc').value;
+  if (!alias || !docId) { alert('Both fields required'); return; }
+  var r = await fetch('/api/aliases', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ alias: alias, doctor_id: parseInt(docId) }) });
+  if (r.ok) location.reload();
+  else alert('Error: ' + (await r.text()));
+}
+async function deleteAlias(id) {
+  if (!confirm('Delete alias?')) return;
+  var r = await fetch('/api/aliases/' + id, { method: 'DELETE' });
   if (r.ok) location.reload();
   else alert('Error: ' + (await r.text()));
 }
@@ -751,89 +736,43 @@ async function calcPage(env) {
 
   const body = `
     <h1>Payout Calculator</h1>
-    <p class="subtitle">Process eCW billing CSV or enter bills manually</p>
+    <p class="subtitle">Upload eCW billing CSV, review and save settlements</p>
 
-    <div class="tab-bar">
-      <div class="tab active" onclick="switchTab('csv')">CSV Upload</div>
-      <div class="tab" onclick="switchTab('manual')">Manual Entry</div>
-      <div class="tab" onclick="switchTab('flags')">Flags</div>
-    </div>
-
-    <!-- CSV Tab -->
-    <div id="tab_csv">
-      <div class="card">
-        <div class="form-row">
-          <div class="form-group">
-            <label>Month</label>
-            <input type="month" id="calc_month" value="${new Date().toISOString().slice(0,7)}">
-          </div>
+    <div class="card">
+      <div class="form-row">
+        <div class="form-group">
+          <label>Month</label>
+          <input type="month" id="calc_month" value="${new Date().toISOString().slice(0,7)}">
         </div>
-        <div class="upload-zone" id="dropZone" onclick="document.getElementById('csvFile').click()">
-          <input type="file" id="csvFile" accept=".csv" style="display:none" multiple onchange="handleFiles(this.files)">
-          <div style="font-size:36px;margin-bottom:8px">📄</div>
-          <div style="font-size:16px;font-weight:600;color:#2d3748">Drop eCW CSV(s) here or click to browse</div>
-          <div style="font-size:13px;color:#a0aec0;margin-top:4px">Upload multiple files — across centres or date ranges. They will be combined.</div>
-        </div>
-        <div id="fileList" class="hidden" style="margin-top:12px"></div>
-        <div id="doctorFilter" class="hidden" style="margin-top:16px">
-          <div class="form-section">
-            <div class="form-section-title" style="display:flex;justify-content:space-between;align-items:center">
-              <span>Select Doctors to Calculate</span>
-              <div class="btn-group">
-                <button class="btn btn-outline btn-sm" onclick="toggleAllDoctors(true)">Select All</button>
-                <button class="btn btn-outline btn-sm" onclick="toggleAllDoctors(false)">Deselect All</button>
-              </div>
+      </div>
+      <div class="upload-zone" id="dropZone" onclick="document.getElementById('csvFile').click()">
+        <input type="file" id="csvFile" accept=".csv" style="display:none" multiple onchange="handleFiles(this.files)">
+        <div style="font-size:36px;margin-bottom:8px">📄</div>
+        <div style="font-size:16px;font-weight:600;color:#2d3748">Drop eCW CSV(s) here or click to browse</div>
+        <div style="font-size:13px;color:#a0aec0;margin-top:4px">Multiple files across centres or date ranges — they combine automatically</div>
+      </div>
+      <div id="fileList" class="hidden" style="margin-top:12px"></div>
+      <div id="doctorFilter" class="hidden" style="margin-top:16px">
+        <div class="form-section">
+          <div class="form-section-title" style="display:flex;justify-content:space-between;align-items:center">
+            <span>Select Doctors to Calculate</span>
+            <div class="btn-group">
+              <button class="btn btn-outline btn-sm" onclick="toggleAllDoctors(true)">Select All</button>
+              <button class="btn btn-outline btn-sm" onclick="toggleAllDoctors(false)">Deselect All</button>
             </div>
-            <div id="doctorCheckboxes" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px"></div>
           </div>
+          <div id="doctorCheckboxes" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px"></div>
         </div>
-        <div style="margin-top:16px;display:flex;justify-content:space-between;align-items:center">
-          <button class="btn btn-outline" id="clearBtn" onclick="clearAllFiles()" style="display:none">Clear All Files</button>
-          <button class="btn btn-primary" id="processBtn" onclick="processCSV()" disabled>Process Bills</button>
-        </div>
+      </div>
+      <div style="margin-top:16px;display:flex;justify-content:space-between;align-items:center">
+        <button class="btn btn-outline" id="clearBtn" onclick="clearAllFiles()" style="display:none">Clear All Files</button>
+        <button class="btn btn-primary" id="processBtn" onclick="processCSV()" disabled>Process Bills</button>
       </div>
     </div>
 
-    <!-- Manual Tab -->
-    <div id="tab_manual" class="hidden">
-      <div class="card">
-        <h3>Enter Individual Bill</h3>
-        <div class="form-row">
-          <div class="form-group"><label>Bill No *</label><input type="text" id="m_billno"></div>
-          <div class="form-group"><label>Bill Date *</label><input type="date" id="m_billdate"></div>
-          <div class="form-group"><label>Patient Name</label><input type="text" id="m_patient"></div>
-        </div>
-        <div class="form-row">
-          <div class="form-group"><label>Consulting Doctor *</label><input type="text" id="m_doctor"></div>
-          <div class="form-group"><label>Referring Doctor</label><input type="text" id="m_refdoctor"></div>
-          <div class="form-group"><label>Sponsor</label><input type="text" id="m_sponsor" placeholder="Blank = CASH"></div>
-        </div>
-        <div class="form-row">
-          <div class="form-group"><label>IP/OP *</label>
-            <select id="m_ipop"><option value="IP">IP</option><option value="OP">OP</option></select>
-          </div>
-          <div class="form-group"><label>Doctor Amt (Rs.)</label><input type="number" id="m_doctoramt" step="0.01"></div>
-          <div class="form-group"><label>Service Amt (Rs.)</label><input type="number" id="m_serviceamt" step="0.01"></div>
-          <div class="form-group"><label>Net Amt (Rs.)</label><input type="number" id="m_netamt" step="0.01"></div>
-        </div>
-        <div class="form-row">
-          <div class="form-group"><label>Department</label><input type="text" id="m_dept" placeholder="e.g. IPD Consultation, IP PACKAGE"></div>
-          <div class="form-group"><label>Service Name</label><input type="text" id="m_servicename"></div>
-        </div>
-        <div style="text-align:right;margin-top:8px">
-          <button class="btn btn-outline" onclick="addManualRow()">+ Add Row to Bill</button>
-          <button class="btn btn-primary" onclick="processManualBill()" style="margin-left:8px">Calculate</button>
-        </div>
-        <div id="manualRows" style="margin-top:12px"></div>
-      </div>
-    </div>
-
-    <!-- Flags Tab -->
-    <div id="tab_flags" class="hidden">
-      <div class="card">
-        <h3>Flagged Bills</h3>
-        <div id="flagsList"><p style="color:#a0aec0">Process a CSV first to see flags.</p></div>
-      </div>
+    <!-- Flags (shown inline after processing, before results) -->
+    <div id="flagsSection" class="hidden" style="margin-top:16px">
+      <div id="flagsList"></div>
     </div>
 
     <!-- Results Section -->
@@ -858,19 +797,10 @@ var DOC_DATA = ${docJson};
 var uploadedFiles = [];  // { name, centre, rows[] }
 var allCsvRows = [];     // combined rows from all files
 var calcResults = null;
-var manualBillRows = [];
 var allFlags = [];
 var detectedDoctors = {}; // docId -> { name, billCount }
 
 // ============ UI HELPERS ============
-function switchTab(t) {
-  ['csv','manual','flags'].forEach(function(x) {
-    document.getElementById('tab_' + x).classList.toggle('hidden', x !== t);
-  });
-  document.querySelectorAll('.tab-bar .tab').forEach(function(el, i) {
-    el.classList.toggle('active', ['csv','manual','flags'][i] === t);
-  });
-}
 
 function toast(msg, type) {
   var d = document.createElement('div');
@@ -1639,7 +1569,13 @@ function displayResults(results, pStats) {
   } else {
     flagsHtml = '<p style="color:#48bb78">No flags. All bills processed cleanly.</p>';
   }
-  document.getElementById('flagsList').innerHTML = flagsHtml;
+  var flagsEl = document.getElementById('flagsList');
+  var flagsSec = document.getElementById('flagsSection');
+  if (flagsEl) flagsEl.innerHTML = flagsHtml;
+  if (flagsSec) {
+    if (allFlags.length > 0 || flagCount > 0) flagsSec.classList.remove('hidden');
+    else flagsSec.classList.add('hidden');
+  }
 }
 
 function buildPoolSummary(r) {
@@ -1722,71 +1658,6 @@ function buildFlagTable(flags) {
   });
   h += '</tbody></table>';
   return h;
-}
-
-// ============ MANUAL ENTRY ============
-function addManualRow() {
-  var row = {
-    department: document.getElementById('m_dept').value.trim(),
-    serviceName: document.getElementById('m_servicename').value.trim(),
-    doctorAmt: parseFloat(document.getElementById('m_doctoramt').value) || 0,
-    serviceAmt: parseFloat(document.getElementById('m_serviceamt').value) || 0,
-    netAmt: parseFloat(document.getElementById('m_netamt').value) || 0
-  };
-  manualBillRows.push(row);
-  var container = document.getElementById('manualRows');
-  container.innerHTML = '<table style="font-size:13px"><thead><tr><th>Dept</th><th>Service</th><th>Dr Amt</th><th>Svc Amt</th><th>Net</th></tr></thead><tbody>' +
-    manualBillRows.map(function(r) { return '<tr><td>' + r.department + '</td><td>' + r.serviceName + '</td><td>' + fmtRs(r.doctorAmt) + '</td><td>' + fmtRs(r.serviceAmt) + '</td><td>' + fmtRs(r.netAmt) + '</td></tr>'; }).join('') +
-    '</tbody></table>';
-  // Clear input fields
-  document.getElementById('m_dept').value = '';
-  document.getElementById('m_servicename').value = '';
-  document.getElementById('m_doctoramt').value = '';
-  document.getElementById('m_serviceamt').value = '';
-  document.getElementById('m_netamt').value = '';
-}
-
-function processManualBill() {
-  var bill = {
-    billNo: document.getElementById('m_billno').value.trim(),
-    billDate: document.getElementById('m_billdate').value,
-    patientName: document.getElementById('m_patient').value.trim(),
-    consultDoctor: document.getElementById('m_doctor').value.trim(),
-    refDoctor: document.getElementById('m_refdoctor').value.trim(),
-    sponsor: document.getElementById('m_sponsor').value.trim(),
-    ipOp: document.getElementById('m_ipop').value,
-    rows: manualBillRows.length > 0 ? manualBillRows : [{
-      department: document.getElementById('m_dept').value.trim() || 'IPD Consultation',
-      serviceName: document.getElementById('m_servicename').value.trim(),
-      doctorAmt: parseFloat(document.getElementById('m_doctoramt').value) || 0,
-      serviceAmt: parseFloat(document.getElementById('m_serviceamt').value) || 0,
-      netAmt: parseFloat(document.getElementById('m_netamt').value) || 0
-    }]
-  };
-
-  if (!bill.billNo || !bill.consultDoctor) { alert('Bill No and Doctor are required'); return; }
-
-  var docId = resolveDoctorId(bill.consultDoctor);
-  if (!docId) { alert('Unknown doctor: ' + bill.consultDoctor + '. Add them first or create an alias.'); return; }
-
-  var doc = getDoctorById(docId);
-  var contract = DOC_DATA.contractMap[docId] || null;
-  var packages = DOC_DATA.packageMap[docId] || [];
-
-  var br = calcBillEarning(bill, contract, packages);
-  br.bill = bill;
-  br.centre = 'Manual';
-
-  var payorBreakdown = { CASH: 0, TPA: 0, PMJAY: 0, Govt: 0, OPD: 0 };
-  if (br.baseMethod.indexOf('OPD') === 0) { payorBreakdown.OPD = br.earning; }
-  else { payorBreakdown[br.payor] = br.earning; }
-
-  var settlement = calcSettlement(docId, [br], contract);
-  calcResults = [{ docId: docId, doctor: doc, contract: contract, billResults: [br], billFlags: br.flagged ? [br] : [], settlement: settlement, centresUsed: { Manual: 1 }, payorBreakdown: payorBreakdown }];
-  allFlags = [];
-  displayResults(calcResults);
-  manualBillRows = [];
-  document.getElementById('manualRows').innerHTML = '';
 }
 
 // ============ EXPORT CSV ============
@@ -2157,8 +2028,11 @@ async function settlementsPage(env, searchParams) {
 
   const body = `
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-      <div><h1>Settlements</h1><p class="subtitle" style="margin:0">Monthly settlement records — Draft → Lock → Approve → Pay</p></div>
-      <a href="/payments/import" class="btn btn-primary">Batch Payment Import</a>
+      <div><h1>Settlements</h1><p class="subtitle" style="margin:0">Draft → Lock → Approve → Pay</p></div>
+      <div class="btn-group">
+        <a href="/adjustments" class="btn btn-outline">Adjustments</a>
+        <a href="/payments/import" class="btn btn-primary">Batch Payment</a>
+      </div>
     </div>
     <div class="card">
       <div class="form-row" style="margin-bottom:16px">
@@ -2584,64 +2458,12 @@ async function monthEndPage(env) {
   }
 
   const body = `
-    <h1>Month-End Dashboard</h1>
-    <p class="subtitle">Settlement status across all centres</p>
+    <h1>Dashboard</h1>
+    <p class="subtitle">MedPay — Settlement status across all centres</p>
     ${momAlerts}
     ${gridHtml}
   `;
-  return htmlShell('Month-End', 'monthend', body);
-}
-
-// ===================== PAGE: Aliases =====================
-async function aliasesPage(env) {
-  const aliases = (await env.DB.prepare('SELECT da.*, d.name as doctor_name, d.display_name FROM doctor_aliases da JOIN doctors d ON d.id = da.doctor_id ORDER BY da.alias').all()).results || [];
-  const doctors = (await env.DB.prepare('SELECT id, name, display_name FROM doctors WHERE active = 1 ORDER BY name').all()).results || [];
-
-  let rows = '';
-  for (const a of aliases) {
-    rows += `<tr><td style="font-weight:600">${a.alias}</td><td>${a.display_name || a.doctor_name}</td><td><button class="btn btn-danger btn-sm" onclick="deleteAlias(${a.id})">Delete</button></td></tr>`;
-  }
-
-  const doctorOptions = doctors.map(d => `<option value="${d.id}">${d.display_name || d.name}</option>`).join('');
-
-  const body = `
-    <h1>Name Aliases</h1>
-    <p class="subtitle">Map eCW doctor names to canonical names in MedPay</p>
-    <div class="card">
-      <h3>Add New Alias</h3>
-      <div class="form-row">
-        <div class="form-group"><label>eCW Name (as it appears in CSV)</label><input type="text" id="new_alias" placeholder="e.g. Dr. Sunil G"></div>
-        <div class="form-group"><label>Maps to Doctor</label><select id="new_doctor_id"><option value="">— Select Doctor —</option>${doctorOptions}</select></div>
-        <div class="form-group" style="align-self:end"><button class="btn btn-primary" onclick="addAlias()">Add Alias</button></div>
-      </div>
-    </div>
-    <div class="card" style="padding:0;overflow-x:auto">
-      <table>
-        <thead><tr><th>eCW Alias</th><th>Canonical Doctor</th><th>Actions</th></tr></thead>
-        <tbody>${rows || '<tr><td colspan="3" style="text-align:center;padding:24px;color:#a0aec0">No aliases configured.</td></tr>'}</tbody>
-      </table>
-    </div>
-  `;
-
-  const script = `<script>
-async function addAlias() {
-  var alias = document.getElementById('new_alias').value.trim();
-  var doctorId = document.getElementById('new_doctor_id').value;
-  if (!alias || !doctorId) { alert('Both alias and doctor are required'); return; }
-  var r = await fetch('/api/aliases', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ alias: alias, doctor_id: parseInt(doctorId) }) });
-  if (r.ok) location.reload();
-  else alert('Error: ' + (await r.text()));
-}
-
-async function deleteAlias(id) {
-  if (!confirm('Delete this alias?')) return;
-  var r = await fetch('/api/aliases/' + id, { method: 'DELETE' });
-  if (r.ok) location.reload();
-  else alert('Error: ' + (await r.text()));
-}
-</script>`;
-
-  return htmlShell('Aliases', 'aliases', body, script);
+  return htmlShell('Dashboard', 'dash', body);
 }
 
 // ===================== API HANDLERS =====================
@@ -3700,9 +3522,9 @@ export default {
       } else if (path === '/settlements') {
         html = await settlementsPage(env, url.searchParams);
       } else if (path === '/aliases') {
-        html = await aliasesPage(env);
+        return new Response(null, { status: 302, headers: { 'Location': '/doctors' } });
       } else if (path === '/month-end') {
-        html = await monthEndPage(env);
+        return new Response(null, { status: 302, headers: { 'Location': '/' } });
       } else if (path === '/adjustments') {
         html = await adjustmentsPage(env, url.searchParams);
       } else if (path === '/payments/import') {
