@@ -910,17 +910,20 @@ function parseCSVLine(line) {
 function groupByBill(rows) {
   var bills = {};
   rows.forEach(function(r) {
-    var bn = r['Bill No'] || '';
+    var bn = r['Bill No.'] || r['Bill No'] || '';
     if (!bn) return;
+    // Derive IP/OP from Bill No prefix: IPB=IP, OPB=OP
+    var ipOp = 'IP';
+    if (bn.toUpperCase().indexOf('OPB') === 0) ipOp = 'OP';
     if (!bills[bn]) {
       bills[bn] = {
         billNo: bn,
         billDate: r['Bill Date'] || '',
         patientName: r['Patient Name'] || '',
-        consultDoctor: r['Doctor Name'] || '',
-        refDoctor: r['Ref. Doctor Name'] || r['Ref Doctor Name'] || '',
+        consultDoctor: r['Consulting Dr'] || r['Doctor Name'] || '',
+        refDoctor: r['Ref. Doctor'] || r['Ref. Doctor Name'] || r['Ref Doctor Name'] || '',
         sponsor: r['Sponsor'] || '',
-        ipOp: r['IP/OP'] || r['IPOP'] || 'IP',
+        ipOp: r['IP/OP'] || r['IPOP'] || ipOp,
         rows: []
       };
     }
@@ -931,7 +934,7 @@ function groupByBill(rows) {
     var serviceName = (r['Service Name'] || '').trim();
 
     // Doctor Amt fallback rule
-    if (doctorAmt === 0 && (dept === 'IPD Consultation' || dept === 'OPD Consultation' || dept === 'Professional Fee')) {
+    if (doctorAmt === 0 && (dept === 'IPD Consultation' || dept === 'OPD Consultation' || dept === 'OP Consultation' || dept === 'Professional Fee' || dept === 'PROCEDURE')) {
       doctorAmt = serviceAmt;
     }
 
@@ -949,7 +952,15 @@ function groupByBill(rows) {
 // ============ LAYER 2: GROUP BY DOCTOR ============
 function normaliseName(name) {
   if (!name) return '';
-  return name.toLowerCase().replace(/\\./g, '').replace(/\\s+/g, ' ').trim();
+  return name.toLowerCase()
+    .replace(/\\./g, '')
+    .replace(/\\s+/g, ' ')
+    .trim()
+    .replace(/\\s*health\\s*one\\s*team$/i, '')
+    .replace(/\\s*healthone\\s*team$/i, '')
+    .replace(/\\s*healthone$/i, '')
+    .replace(/\\s*health\\s*one$/i, '')
+    .trim();
 }
 
 function resolveDoctorId(name) {
@@ -978,7 +989,7 @@ function groupByDoctor(bills) {
     var norm = normaliseName(docName);
 
     // Skip hospital/RMO rows
-    if (norm.indexOf('health one hospital') >= 0 || norm === 'rmo' || norm.indexOf('rmo') === 0) return;
+    if (norm.indexOf('health one hospital') >= 0 || norm.indexOf('health team rmo') >= 0 || norm === 'rmo' || norm.indexOf('rmo') === 0) return;
 
     var docId = resolveDoctorId(docName);
     if (!docId) {
@@ -1013,7 +1024,7 @@ function getMethodBBase(bill) {
   bill.rows.forEach(function(r) {
     totalNet += r.netAmt;
     var dept = r.department.toLowerCase();
-    if (dept.indexOf('radiology') >= 0 || dept.indexOf('pathology') >= 0 || dept.indexOf('pharmacy') >= 0 || dept.indexOf('lab') >= 0) {
+    if (dept.indexOf('radiology') >= 0 || dept.indexOf('pathology') >= 0 || dept.indexOf('pharmacy') >= 0 || dept === 'laboratory' || dept.indexOf('laboratory') === 0) {
       excludeAmt += r.serviceAmt;
     }
   });
