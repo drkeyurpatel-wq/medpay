@@ -1744,9 +1744,11 @@ async function settlementsPage(env, searchParams) {
   const settlements = (await stmt.all()).results || [];
 
   let rows = '';
+  let pmtDataMap = {};
   for (const s of settlements) {
     const hasPmt = !!s.payment_utr;
     const pmtBadge = hasPmt ? `<span class="badge badge-active">Paid</span>` : (s.locked ? `<span class="badge" style="background:#fefcbf;color:#975a16">Awaiting Payment</span>` : '');
+    pmtDataMap[s.id] = { utr: s.payment_utr||'', date: s.payment_date||'', bank: s.payment_bank||'', mode: s.payment_mode||'NEFT', amount: s.payment_amount||s.final_payout };
     rows += `<tr>
       <td>${s.month}</td>
       <td>${s.centre}</td>
@@ -1758,7 +1760,7 @@ async function settlementsPage(env, searchParams) {
       <td>
         <div class="btn-group">
           <button class="btn btn-outline btn-sm" onclick="viewBills(${s.id})">Bills</button>
-          ${s.locked ? '<button class="btn btn-sm" style="background:#ebf4ff;color:#2b6cb0" onclick="showPaymentModal(' + s.id + ', ' + JSON.stringify(JSON.stringify({utr: s.payment_utr||'', date: s.payment_date||'', bank: s.payment_bank||'', mode: s.payment_mode||'', amount: s.payment_amount||s.final_payout})) + ')">Payment</button>' : ''}
+          ${s.locked ? `<button class="btn btn-sm" style="background:#ebf4ff;color:#2b6cb0" onclick="showPaymentModal(${s.id})">Payment</button>` : ''}
           ${s.locked && hasPmt ? '<a href="/statement/' + s.id + '" target="_blank" class="btn btn-success btn-sm">Statement</a>' : ''}
           ${!s.locked ? '<button class="btn btn-success btn-sm" onclick="lockSettlement(' + s.id + ')">Lock</button>' : '<button class="btn btn-outline btn-sm" onclick="unlockSettlement(' + s.id + ')">Unlock</button>'}
           ${!s.locked ? '<button class="btn btn-danger btn-sm" onclick="deleteSettlement(' + s.id + ')">Delete</button>' : ''}
@@ -1766,6 +1768,7 @@ async function settlementsPage(env, searchParams) {
       </td>
     </tr>`;
   }
+  const pmtDataJson = JSON.stringify(pmtDataMap);
 
   const body = `
     <h1>Settlements</h1>
@@ -1827,6 +1830,8 @@ async function settlementsPage(env, searchParams) {
   `;
 
   const script = `<script>
+var PMT_DATA = ${pmtDataJson};
+
 function applyFilter() {
   var m = document.getElementById('filter_month').value;
   var c = document.getElementById('filter_centre').value;
@@ -1879,8 +1884,8 @@ function closeBillModal() {
   modal.style.display = 'none';
 }
 
-function showPaymentModal(id, dataJson) {
-  var data = JSON.parse(dataJson);
+function showPaymentModal(id) {
+  var data = PMT_DATA[id] || {};
   document.getElementById('pmt_settlement_id').value = id;
   document.getElementById('pmt_utr').value = data.utr || '';
   document.getElementById('pmt_date').value = data.date || new Date().toISOString().slice(0,10);
