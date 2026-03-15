@@ -2549,20 +2549,93 @@ async function monthEndPage(env) {
   const centres = ['Shilaj', 'Vastral', 'Modasa', 'Gandhinagar', 'Udaipur'];
   const now = new Date();
 
-  // Get last 3 months
+  // Get last 6 months for trends
   const months = [];
-  for (let i = 0; i < 3; i++) {
+  for (let i = 0; i < 6; i++) {
     const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
     months.push(d.toISOString().slice(0, 7));
   }
-
-  const allSettlements = (await env.DB.prepare('SELECT ms.*, d.name as doctor_name, d.display_name FROM monthly_settlements ms JOIN doctors d ON d.id = ms.doctor_id WHERE ms.month IN (?, ?, ?) ORDER BY ms.month DESC').bind(months[0], months[1], months[2]).all()).results || [];
+  const placeholders = months.map(() => '?').join(',');
+  const allSettlements = (await env.DB.prepare(`SELECT ms.*, d.name as doctor_name, d.display_name FROM monthly_settlements ms JOIN doctors d ON d.id = ms.doctor_id WHERE ms.month IN (${placeholders}) ORDER BY ms.month`).bind(...months).all()).results || [];
   const totalDoctors = (await env.DB.prepare('SELECT COUNT(*) as cnt FROM doctors WHERE active = 1').first()).cnt || 0;
+  const contracts = (await env.DB.prepare('SELECT c.*, d.name as doctor_name FROM contracts c JOIN doctors d ON d.id = c.doctor_id').all()).results || [];
 
-  // MoM comparison: current vs previous month per doctor
+  // Bill calculations for payor mix (current month)
+  const currMonth = months[0];
+  const currSettlementIds = allSettlements.filter(s => s.month === currMonth).map(s => s.id);
+  let payorData = { CASH: 0, TPA: 0, PMJAY: 0, Govt: 0, OPD: 0 };
+  if (currSettlementIds.length > 0) {
+    const bp = currSettlementIds.map(() => '?').join(',');
+    const bills = (await env.DB.prepare(`SELECT payor_type, base_method, SUM(doctor_earning) as total FROM bill_calculations WHERE settlement_id IN (${bp}) AND (excluded = 0 OR excluded IS NULL) GROUP BY payor_type`).bind(...currSettlementIds).all()).results || [];
+    for (const b of bills) {
+      if ((b.base_method || '').indexOf('OPD') === 0) payorData.OPD += b.total || 0;
+      else if (payorData[b.payor_type] !== undefined) payorData[b.payor_type] += b.total || 0;
+      else payorData.CASH += b.total || 0;
+    }
+  }
+
+  // Monthly aggregates for trend chart
+  const monthLabels = [];
+  const monthPool = [];
+  const monthGross = [];
+  const monthNet = [];
+  const monthTds = [];
+  const monthDoctorCount = [];
+  const reversedMonths = [...months].reverse();
+  for (const m of reversedMonths) {
+    const mn = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const [y, mo] = m.split('-');
+    monthLabels.push(mn[parseInt(mo) - 1] + ' ' + y.slice(2));
+    const ms = allSettlements.filter(s => s.month === m);
+    monthPool.push(Math.round(ms.reduce((s, x) => s + (x.calculated_pool || 0), 0)));
+    monthGross.push(Math.round(ms.reduce((s, x) => s + (x.final_payout || 0), 0)));
+    monthNet.push(Math.round(ms.reduce((s, x) => s + (x.net_payout || (x.final_payout * 0.9) || 0), 0)));
+    monthTds.push(Math.round(ms.reduce((s, x) => s + (x.tds_amount || 0), 0)));
+    monthDoctorCount.push(ms.length);
+  }
+
+  // Centre-wise for current month
+  const centrePool = [];
+  const centreNet = [];
+  for (const c of centres) {
+    const cs = allSettlements.filter(s => s.month === currMonth && s.centre === c);
+    centrePool.push(Math.round(cs.reduce((s, x) => s + (x.calculated_pool || 0), 0)));
+    centreNet.push(Math.round(cs.reduce((s, x) => s + (x.net_payout || (x.final_payout * 0.9) || 0), 0)));
+  }
+
+  // MGM analysis for current month
+  const currSettlements = allSettlements.filter(s => s.month === currMonth);
+  let mgmDoctors = 0, mgmAbove = 0, mgmBelow = 0, incentiveCount = 0;
+  const mgmContracts = contracts.filter(c => c.contract_type === 'MGM');
+  mgmDoctors = mgmContracts.length;
+  for (const s of currSettlements) {
+    if (s.mgm_triggered) mgmBelow++;
+    if (s.incentive_triggered) incentiveCount++;
+  }
+  mgmAbove = currSettlements.filter(s => !s.mgm_triggered).length;
+  const hospitalShortfall = currSettlements.filter(s => s.mgm_triggered).reduce((sum, s) => sum + ((s.final_payout || 0) - (s.calculated_pool || 0)), 0);
+
+  // Payment status
+  const statusCounts = { draft: 0, locked: 0, approved: 0, paid: 0 };
+  for (const s of currSettlements) {
+    const st = s.status || (s.payment_utr ? 'paid' : (s.locked ? 'locked' : 'draft'));
+    statusCounts[st] = (statusCounts[st] || 0) + 1;
+  }
+
+  // Top earners current month
+  const topEarners = [...currSettlements].sort((a, b) => (b.calculated_pool || 0) - (a.calculated_pool || 0)).slice(0, 8);
+
+  // Current month KPIs
+  const currPool = currSettlements.reduce((s, x) => s + (x.calculated_pool || 0), 0);
+  const currGross = currSettlements.reduce((s, x) => s + (x.final_payout || 0), 0);
+  const currTds = currSettlements.reduce((s, x) => s + (x.tds_amount || 0), 0);
+  const currNetTotal = currSettlements.reduce((s, x) => s + (x.net_payout || (x.final_payout * 0.9) || 0), 0);
+  const currPaid = currSettlements.filter(s => !!s.payment_utr).reduce((s, x) => s + (x.payment_amount || 0), 0);
+  const currPending = currNetTotal - currPaid;
+
+  // MoM alerts
   let momAlerts = '';
   if (months.length >= 2) {
-    const currMonth = months[0];
     const prevMonth = months[1];
     const currByDoc = {};
     const prevByDoc = {};
@@ -2570,103 +2643,155 @@ async function monthEndPage(env) {
       if (s.month === currMonth) currByDoc[s.doctor_id] = { pool: s.calculated_pool || 0, name: s.display_name || s.doctor_name, centre: s.centre };
       if (s.month === prevMonth) prevByDoc[s.doctor_id] = { pool: s.calculated_pool || 0, name: s.display_name || s.doctor_name, centre: s.centre };
     });
-
     let alerts = [];
     for (const docId of Object.keys(currByDoc)) {
-      const curr = currByDoc[docId];
-      const prev = prevByDoc[docId];
+      const curr = currByDoc[docId]; const prev = prevByDoc[docId];
       if (!prev || prev.pool === 0) continue;
       const change = ((curr.pool - prev.pool) / prev.pool) * 100;
-      if (Math.abs(change) >= 30) {
-        alerts.push({ name: curr.name, centre: curr.centre, currPool: curr.pool, prevPool: prev.pool, changePct: change });
-      }
+      if (Math.abs(change) >= 30) alerts.push({ name: curr.name, centre: curr.centre, currPool: curr.pool, prevPool: prev.pool, changePct: change });
     }
-    // Doctors in prev but not curr
     for (const docId of Object.keys(prevByDoc)) {
-      if (!currByDoc[docId]) {
-        const prev = prevByDoc[docId];
-        alerts.push({ name: prev.name, centre: prev.centre, currPool: 0, prevPool: prev.pool, changePct: -100, missing: true });
-      }
+      if (!currByDoc[docId]) alerts.push({ name: prevByDoc[docId].name, centre: prevByDoc[docId].centre, currPool: 0, prevPool: prevByDoc[docId].pool, changePct: -100, missing: true });
     }
-
     if (alerts.length > 0) {
       alerts.sort((a, b) => a.changePct - b.changePct);
-      momAlerts = `<div class="card flag-card" style="margin-bottom:24px">
-        <div class="card-header"><div class="card-title" style="color:#c53030">MoM Anomaly Alerts (${alerts.length})</div></div>
-        <p style="font-size:13px;color:#718096;margin-bottom:12px">Doctors with &gt;30% pool change between ${prevMonth} and ${currMonth}</p>
-        <table style="font-size:13px">
-          <thead><tr><th>Doctor</th><th>Centre</th><th style="text-align:right">${prevMonth}</th><th style="text-align:right">${currMonth}</th><th style="text-align:right">Change</th><th>Flag</th></tr></thead>
-          <tbody>${alerts.map(a => {
-            const color = a.changePct < 0 ? '#c53030' : '#276749';
-            const flag = a.missing ? 'No data this month' : (a.changePct < -50 ? 'Major drop — check data' : (a.changePct < 0 ? 'Significant decline' : 'Significant spike'));
-            return `<tr><td style="font-weight:600">${a.name}</td><td>${a.centre}</td><td style="text-align:right">${fmtRs(a.prevPool)}</td><td style="text-align:right">${fmtRs(a.currPool)}</td><td style="text-align:right;font-weight:600;color:${color}">${a.changePct > 0 ? '+' : ''}${a.changePct.toFixed(0)}%</td><td><span class="flag-badge">${flag}</span></td></tr>`;
-          }).join('')}</tbody>
-        </table>
+      momAlerts = `<div class="card" style="border-left:4px solid #c53030;margin-bottom:20px">
+        <div style="font-weight:700;color:#c53030;margin-bottom:8px">MoM Anomaly Alerts (${alerts.length})</div>
+        <table style="font-size:12px"><thead><tr><th>Doctor</th><th>Centre</th><th style="text-align:right">${prevMonth}</th><th style="text-align:right">${currMonth}</th><th style="text-align:right">Change</th></tr></thead>
+        <tbody>${alerts.slice(0, 10).map(a => `<tr><td style="font-weight:600">${a.name}</td><td>${a.centre}</td><td style="text-align:right">${fmtRs(a.prevPool)}</td><td style="text-align:right">${fmtRs(a.currPool)}</td><td style="text-align:right;font-weight:600;color:${a.changePct < 0 ? '#c53030' : '#276749'}">${a.changePct > 0 ? '+' : ''}${a.changePct.toFixed(0)}%</td></tr>`).join('')}</tbody></table>
       </div>`;
     }
   }
 
-  let gridHtml = '';
-  for (const month of months) {
-    const monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-    const [y, m] = month.split('-');
-    const label = monthNames[parseInt(m) - 1] + ' ' + y;
-
-    let centreCards = '';
-    for (const centre of centres) {
-      const cs = allSettlements.filter(s => s.month === month && s.centre === centre);
-      const getStatus = function(x) { return x.status || (x.payment_utr ? 'paid' : (x.locked ? 'locked' : 'draft')); };
-      const drafted = cs.filter(s => getStatus(s) === 'draft').length;
-      const locked = cs.filter(s => getStatus(s) === 'locked').length;
-      const approved = cs.filter(s => getStatus(s) === 'approved').length;
-      const paid = cs.filter(s => getStatus(s) === 'paid' || !!s.payment_utr).length;
-      const totalPayout = cs.reduce((sum, s) => sum + (s.final_payout || 0), 0);
-      const totalNet = cs.reduce((sum, s) => sum + (s.net_payout || s.final_payout * 0.9 || 0), 0);
-      const total = cs.length;
-
-      let statusColor = '#e2e8f0';
-      if (total > 0 && paid === total) statusColor = '#48bb78';
-      else if (approved > 0 || paid > 0) statusColor = '#ed8936';
-      else if (locked > 0) statusColor = '#4299e1';
-      else if (drafted > 0) statusColor = '#a0aec0';
-
-      centreCards += `<div class="card" style="padding:16px;border-top:3px solid ${statusColor}">
+  // Centre status grid (compact)
+  let centreStatusHtml = '';
+  for (const centre of centres) {
+    const cs = currSettlements.filter(s => s.centre === centre);
+    const paid = cs.filter(s => !!s.payment_utr).length;
+    const total = cs.length;
+    const net = cs.reduce((s, x) => s + (x.net_payout || (x.final_payout * 0.9) || 0), 0);
+    const pct = total > 0 ? Math.round(paid / total * 100) : 0;
+    const barColor = pct === 100 ? '#48bb78' : (pct > 0 ? '#ed8936' : '#e2e8f0');
+    centreStatusHtml += `<div class="card" style="padding:14px">
+      <div style="display:flex;justify-content:space-between;align-items:center">
         <div style="font-weight:700;font-size:14px;color:#1a365d">${centre}</div>
-        <div style="font-size:22px;font-weight:700;color:#276749;margin:4px 0">${fmtRs(totalNet)}</div>
-        <div style="font-size:12px;color:#718096">Gross: ${fmtRs(totalPayout)}</div>
-        <div style="margin-top:8px;display:flex;gap:4px;flex-wrap:wrap">
-          ${drafted > 0 ? `<span class="badge badge-inactive">${drafted} Draft</span>` : ''}
-          ${locked > 0 ? `<span class="badge" style="background:#ebf4ff;color:#2b6cb0">${locked} Locked</span>` : ''}
-          ${approved > 0 ? `<span class="badge" style="background:#fefcbf;color:#975a16">${approved} Approved</span>` : ''}
-          ${paid > 0 ? `<span class="badge badge-active">${paid} Paid</span>` : ''}
-          ${total === 0 ? `<span class="badge" style="background:#f0f0f0;color:#a0aec0">No data</span>` : ''}
-        </div>
-        <div style="font-size:11px;color:#a0aec0;margin-top:4px">${total} of ${totalDoctors} doctors</div>
-      </div>`;
-    }
-
-    const monthTotal = allSettlements.filter(s => s.month === month);
-    const monthGross = monthTotal.reduce((sum, s) => sum + (s.final_payout || 0), 0);
-    const monthNet = monthTotal.reduce((sum, s) => sum + (s.net_payout || s.final_payout * 0.9 || 0), 0);
-    const monthPaid = monthTotal.filter(s => !!s.payment_utr).length;
-
-    gridHtml += `
-      <div style="margin-bottom:32px">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-          <h2 style="margin:0">${label}</h2>
-          <div style="font-size:14px;color:#4a5568">Gross: <strong>${fmtRs(monthGross)}</strong> | Net: <strong style="color:#276749">${fmtRs(monthNet)}</strong> | ${monthPaid}/${monthTotal.length} paid</div>
-        </div>
-        <div class="stat-grid" style="grid-template-columns:repeat(5,1fr)">${centreCards}</div>
-      </div>`;
+        <div style="font-size:18px;font-weight:700;color:#276749">${fmtRs(net)}</div>
+      </div>
+      <div style="margin-top:8px;background:#e2e8f0;border-radius:4px;height:6px;overflow:hidden"><div style="width:${pct}%;background:${barColor};height:100%;border-radius:4px;transition:width 0.5s"></div></div>
+      <div style="font-size:11px;color:#718096;margin-top:4px">${paid}/${total} paid (${pct}%)</div>
+    </div>`;
   }
+
+  const chartData = JSON.stringify({ monthLabels, monthPool, monthGross, monthNet, monthTds, monthDoctorCount, centres, centrePool, centreNet, payorData, statusCounts });
 
   const body = `
-    <h1>Dashboard</h1>
-    <p class="subtitle">MedPay — Settlement status across all centres</p>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
+      <div><h1 style="margin:0">Dashboard</h1><p style="color:#718096;font-size:13px;margin-top:2px">${currMonth} — ${totalDoctors} active doctors across ${centres.length} centres</p></div>
+    </div>
+
+    <!-- KPIs -->
+    <div class="stat-grid" style="grid-template-columns:repeat(6,1fr);margin-bottom:20px">
+      <div class="stat-card"><div class="label">Doctors Settled</div><div class="value">${currSettlements.length}</div><div class="sub">of ${totalDoctors} active</div></div>
+      <div class="stat-card"><div class="label">Prof Fee Pool</div><div class="value" style="color:#2b6cb0">${fmtRs(currPool)}</div></div>
+      <div class="stat-card"><div class="label">Gross Payout</div><div class="value">${fmtRs(currGross)}</div></div>
+      <div class="stat-card"><div class="label">TDS Deducted</div><div class="value" style="color:#c53030">${fmtRs(currTds)}</div></div>
+      <div class="stat-card"><div class="label">Net Payout</div><div class="value" style="color:#276749">${fmtRs(currNetTotal)}</div></div>
+      <div class="stat-card"><div class="label">Pending</div><div class="value" style="color:${currPending > 0 ? '#c53030' : '#276749'}">${fmtRs(currPending)}</div></div>
+    </div>
+
+    <!-- Charts Row 1 -->
+    <div style="display:grid;grid-template-columns:2fr 1fr;gap:16px;margin-bottom:20px">
+      <div class="card" style="padding:16px"><div style="font-weight:700;font-size:14px;color:#1a365d;margin-bottom:12px">6-Month Payout Trend</div><canvas id="trendChart" height="180"></canvas></div>
+      <div class="card" style="padding:16px"><div style="font-weight:700;font-size:14px;color:#1a365d;margin-bottom:12px">Payment Status (${currMonth})</div><canvas id="statusChart" height="180"></canvas></div>
+    </div>
+
+    <!-- Charts Row 2 -->
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px">
+      <div class="card" style="padding:16px"><div style="font-weight:700;font-size:14px;color:#1a365d;margin-bottom:12px">Centre-wise (${currMonth})</div><canvas id="centreChart" height="160"></canvas></div>
+      <div class="card" style="padding:16px"><div style="font-weight:700;font-size:14px;color:#1a365d;margin-bottom:12px">Payor Mix (${currMonth})</div><canvas id="payorChart" height="160"></canvas></div>
+    </div>
+
+    <!-- MGM + Top Earners + Alerts -->
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px">
+      <div class="card" style="padding:16px">
+        <div style="font-weight:700;font-size:14px;color:#1a365d;margin-bottom:12px">MGM Analysis (${currMonth})</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+          <div style="text-align:center;padding:12px;background:#f0fff4;border-radius:8px"><div style="font-size:24px;font-weight:700;color:#276749">${mgmAbove}</div><div style="font-size:11px;color:#718096">Above MGM</div></div>
+          <div style="text-align:center;padding:12px;background:#fff5f5;border-radius:8px"><div style="font-size:24px;font-weight:700;color:#c53030">${mgmBelow}</div><div style="font-size:11px;color:#718096">Below MGM</div></div>
+          <div style="text-align:center;padding:12px;background:#ebf4ff;border-radius:8px"><div style="font-size:24px;font-weight:700;color:#2b6cb0">${incentiveCount}</div><div style="font-size:11px;color:#718096">Incentive Earned</div></div>
+          <div style="text-align:center;padding:12px;background:#fefcbf;border-radius:8px"><div style="font-size:24px;font-weight:700;color:#975a16">${fmtRs(hospitalShortfall)}</div><div style="font-size:11px;color:#718096">Hospital Shortfall</div></div>
+        </div>
+      </div>
+      <div class="card" style="padding:16px">
+        <div style="font-weight:700;font-size:14px;color:#1a365d;margin-bottom:12px">Top Earners (${currMonth})</div>
+        <table style="font-size:12px">
+          <tbody>${topEarners.map((s, i) => `<tr><td style="color:#a0aec0;width:20px">${i + 1}</td><td style="font-weight:600">${s.display_name || s.doctor_name}</td><td style="text-align:right;color:#2b6cb0;font-weight:600">${fmtRs(s.calculated_pool)}</td><td style="text-align:right;color:#276749">${fmtRs(s.net_payout || s.final_payout * 0.9)}</td></tr>`).join('')}</tbody>
+        </table>
+      </div>
+    </div>
+
     ${momAlerts}
-    ${gridHtml}
+
+    <!-- Centre Status -->
+    <div style="font-weight:700;font-size:14px;color:#1a365d;margin-bottom:12px">Centre Settlement Progress (${currMonth})</div>
+    <div class="stat-grid" style="grid-template-columns:repeat(5,1fr);margin-bottom:20px">${centreStatusHtml}</div>
   `;
-  return htmlShell('Dashboard', 'dash', body);
+
+  const script = `<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script>
+var D = ${chartData};
+var colors = { pool: '#2b6cb0', gross: '#4a5568', net: '#276749', tds: '#c53030' };
+
+// Trend Chart
+new Chart(document.getElementById('trendChart'), {
+  type: 'line',
+  data: {
+    labels: D.monthLabels,
+    datasets: [
+      { label: 'Pool', data: D.monthPool, borderColor: colors.pool, backgroundColor: colors.pool + '20', fill: true, tension: 0.3, borderWidth: 2, pointRadius: 3 },
+      { label: 'Net', data: D.monthNet, borderColor: colors.net, backgroundColor: colors.net + '20', fill: true, tension: 0.3, borderWidth: 2, pointRadius: 3 },
+      { label: 'TDS', data: D.monthTds, borderColor: colors.tds, backgroundColor: colors.tds + '20', fill: false, tension: 0.3, borderWidth: 1, pointRadius: 2, borderDash: [4,4] }
+    ]
+  },
+  options: { responsive: true, plugins: { legend: { position: 'bottom', labels: { boxWidth: 12, font: { size: 11 } } } }, scales: { y: { ticks: { callback: function(v) { return (v/100000).toFixed(0) + 'L'; } } } } }
+});
+
+// Status Donut
+new Chart(document.getElementById('statusChart'), {
+  type: 'doughnut',
+  data: {
+    labels: ['Draft', 'Locked', 'Approved', 'Paid'],
+    datasets: [{ data: [D.statusCounts.draft, D.statusCounts.locked, D.statusCounts.approved, D.statusCounts.paid], backgroundColor: ['#e2e8f0', '#4299e1', '#ed8936', '#48bb78'], borderWidth: 0 }]
+  },
+  options: { responsive: true, cutout: '65%', plugins: { legend: { position: 'bottom', labels: { boxWidth: 12, font: { size: 11 } } } } }
+});
+
+// Centre Bar
+new Chart(document.getElementById('centreChart'), {
+  type: 'bar',
+  data: {
+    labels: D.centres,
+    datasets: [
+      { label: 'Pool', data: D.centrePool, backgroundColor: '#2b6cb0', borderRadius: 4 },
+      { label: 'Net Payout', data: D.centreNet, backgroundColor: '#48bb78', borderRadius: 4 }
+    ]
+  },
+  options: { responsive: true, plugins: { legend: { position: 'bottom', labels: { boxWidth: 12, font: { size: 11 } } } }, scales: { y: { ticks: { callback: function(v) { return (v/100000).toFixed(0) + 'L'; } } } } }
+});
+
+// Payor Donut
+var pd = D.payorData;
+new Chart(document.getElementById('payorChart'), {
+  type: 'doughnut',
+  data: {
+    labels: ['CASH', 'TPA', 'PMJAY', 'Govt', 'OPD'],
+    datasets: [{ data: [pd.CASH, pd.TPA, pd.PMJAY, pd.Govt, pd.OPD], backgroundColor: ['#2b6cb0', '#4299e1', '#ed8936', '#48bb78', '#9f7aea'], borderWidth: 0 }]
+  },
+  options: { responsive: true, cutout: '65%', plugins: { legend: { position: 'bottom', labels: { boxWidth: 12, font: { size: 11 } } } } }
+});
+</script>`;
+
+  return htmlShell('Dashboard', 'dash', body, script);
 }
 
 // ===================== API HANDLERS =====================
