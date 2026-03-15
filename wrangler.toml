@@ -5,4 +5,4 @@ compatibility_date = "2024-01-01"
 [[d1_databases]]
 binding = "DB"
 database_name = "medpay-db"
-database_id = "eef2fd83-1a4e-4d8e-b0a4-51e9be88bc7d"
+database_id = "04f7e5ae-0ca3-4296-9818-73eadefd555a"
