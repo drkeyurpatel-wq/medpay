@@ -199,12 +199,34 @@ function badgeClass(type) {
   return map[type] || 'badge-mgm';
 }
 
+// ===================== Audit Log Helper =====================
+async function auditLog(env, auth, action, entity, entityId, details) {
+  try {
+    await env.DB.prepare('INSERT INTO audit_log (user_pin, user_role, user_name, action, entity, entity_id, details) VALUES (?, ?, ?, ?, ?, ?, ?)').bind(
+      auth.role === 'admin' ? 'admin' : (auth.doctorName || ''), auth.role, auth.doctorName || 'Admin', action, entity, entityId, typeof details === 'string' ? details : JSON.stringify(details)
+    ).run();
+  } catch(e) { /* silent */ }
+}
+
+// ===================== Rate Limiting =====================
+async function checkRateLimit(env, ip) {
+  const cutoff = new Date(Date.now() - 60000).toISOString();
+  await env.DB.prepare('DELETE FROM login_attempts WHERE attempted_at < ?').bind(cutoff).run();
+  const count = (await env.DB.prepare('SELECT COUNT(*) as cnt FROM login_attempts WHERE ip = ?').bind(ip).first()).cnt || 0;
+  return count < 5;
+}
+
+async function recordLoginAttempt(env, ip) {
+  await env.DB.prepare('INSERT INTO login_attempts (ip) VALUES (?)').bind(ip).run();
+}
+
 // ===================== Shared Doctor Data Loader =====================
 async function loadDoctorData(env) {
   const doctors = (await env.DB.prepare('SELECT * FROM doctors ORDER BY name').all()).results || [];
   const contracts = (await env.DB.prepare('SELECT * FROM contracts').all()).results || [];
   const aliases = (await env.DB.prepare('SELECT * FROM doctor_aliases').all()).results || [];
   const packages = (await env.DB.prepare('SELECT * FROM procedure_packages').all()).results || [];
+  const deptMap = (await env.DB.prepare('SELECT * FROM department_map').all()).results || [];
   // Build lookup maps
   const contractMap = {};
   for (const c of contracts) contractMap[c.doctor_id] = c;
@@ -215,7 +237,10 @@ async function loadDoctorData(env) {
     if (!packageMap[p.doctor_id]) packageMap[p.doctor_id] = [];
     packageMap[p.doctor_id].push(p);
   }
-  return { doctors, contracts, contractMap, aliases, aliasMap, packages, packageMap };
+  // Department category lookup
+  const deptCategoryMap = {};
+  for (const d of deptMap) deptCategoryMap[d.ecw_department.toLowerCase()] = d.category;
+  return { doctors, contracts, contractMap, aliases, aliasMap, packages, packageMap, deptMap, deptCategoryMap };
 }
 
 // ===================== PAGE: Dashboard =====================
@@ -690,7 +715,8 @@ async function calcPage(env) {
     doctors: data.doctors.filter(d => d.active),
     contractMap: data.contractMap,
     aliasMap: data.aliasMap,
-    packageMap: data.packageMap
+    packageMap: data.packageMap,
+    deptCategoryMap: data.deptCategoryMap
   });
 
   const body = `
@@ -1156,11 +1182,16 @@ function getMethodBBase(bill) {
   bill.rows.forEach(function(r) {
     totalNet += r.netAmt;
     var dept = r.department.toLowerCase();
-    if (dept.indexOf('radiology') >= 0 || dept.indexOf('pathology') >= 0 || dept.indexOf('pharmacy') >= 0 || dept === 'laboratory' || dept.indexOf('laboratory') === 0) {
+    var cat = DOC_DATA.deptCategoryMap[dept] || '';
+    // Exclude rad_exclude, lab_exclude, pharma_exclude categories
+    if (cat === 'rad_exclude' || cat === 'lab_exclude' || cat === 'pharma_exclude') {
+      excludeAmt += r.serviceAmt;
+    }
+    // Fallback: substring match for departments not in map
+    if (!cat && (dept.indexOf('radiology') >= 0 || dept.indexOf('pathology') >= 0 || dept.indexOf('pharmacy') >= 0 || dept === 'laboratory')) {
       excludeAmt += r.serviceAmt;
     }
   });
-  // Use bill-level net if available (sum of row netAmts is the bill net)
   return totalNet - excludeAmt;
 }
 
@@ -1348,6 +1379,9 @@ function calcSettlement(docId, billResults, contract) {
 function processCSV() {
   if (!allCsvRows || allCsvRows.length === 0) { alert('No CSV data loaded'); return; }
 
+  // Pipeline stats
+  var pStats = { rows: allCsvRows.length, bills: 0, doctorsMatched: 0, doctorsFlagged: 0, mgmCount: 0, incentiveCount: 0, zeroBills: 0 };
+
   // Get selected doctor IDs
   var selectedDocIds = {};
   var anyChecked = false;
@@ -1356,8 +1390,10 @@ function processCSV() {
   });
 
   var bills = groupByBill(allCsvRows);
+  pStats.bills = bills.length;
   var grouped = groupByDoctor(bills);
   allFlags = grouped.flags;
+  pStats.doctorsFlagged = allFlags.length;
 
   var results = [];
   var doctorBills = grouped.doctorBills;
@@ -1411,12 +1447,42 @@ function processCSV() {
 
   // Sort by payout descending
   results.sort(function(a, b) { return b.settlement.payout - a.settlement.payout; });
+  pStats.doctorsMatched = results.length;
+  results.forEach(function(r) {
+    if (r.settlement.mgmTriggered) pStats.mgmCount++;
+    if (r.settlement.incentiveTriggered) pStats.incentiveCount++;
+    r.billResults.forEach(function(br) { if (br.earning === 0 && !br.excluded) pStats.zeroBills++; });
+  });
   calcResults = results;
-  displayResults(results);
+  displayResults(results, pStats);
 }
 
-function displayResults(results) {
+function displayResults(results, pStats) {
   document.getElementById('results').classList.remove('hidden');
+
+  // Clear any previous pipeline/search elements
+  var oldPipe = document.getElementById('pipelineSummary');
+  if (oldPipe) oldPipe.remove();
+  var oldSearch = document.getElementById('resultSearchWrap');
+  if (oldSearch) oldSearch.remove();
+
+  // Pipeline summary
+  if (pStats) {
+    var pipeHtml = '<div id="pipelineSummary" class="card" style="padding:12px 20px;margin-bottom:16px;background:linear-gradient(135deg,#ebf4ff,#f7fafc);border-left:4px solid #2b6cb0">' +
+      '<div style="font-size:12px;font-weight:700;color:#1a365d;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px">Pipeline Summary</div>' +
+      '<div style="display:flex;gap:16px;flex-wrap:wrap;font-size:13px;color:#4a5568">' +
+      '<span>L1: <strong>' + pStats.rows + '</strong> rows</span>' +
+      '<span>\\u2192 L2: <strong>' + pStats.bills + '</strong> bills</span>' +
+      '<span>\\u2192 L3: <strong>' + pStats.doctorsMatched + '</strong> doctors' + (pStats.doctorsFlagged > 0 ? ', <span style="color:#c53030">' + pStats.doctorsFlagged + ' flagged</span>' : '') + '</span>' +
+      '<span>\\u2192 L4: ' + (pStats.mgmCount > 0 ? '<span style="color:#ed8936">' + pStats.mgmCount + ' MGM</span> ' : '') + (pStats.incentiveCount > 0 ? '<span style="color:#48bb78">' + pStats.incentiveCount + ' Incentive</span>' : '') + (pStats.mgmCount === 0 && pStats.incentiveCount === 0 ? 'No triggers' : '') + '</span>' +
+      (pStats.zeroBills > 0 ? '<span>\\u26A0 <span style="color:#ed8936">' + pStats.zeroBills + ' zero-earning bills</span></span>' : '') +
+      '</div></div>';
+    document.getElementById('resultStats').insertAdjacentHTML('beforebegin', pipeHtml);
+  }
+
+  // Search box
+  var searchWrap = '<div id="resultSearchWrap" style="margin-bottom:12px"><input type="text" id="resultSearch" placeholder="Search doctors, patients, bill numbers..." style="width:100%;padding:10px 16px;border:1px solid #e2e8f0;border-radius:8px;font-size:14px" oninput="filterResultCards(this.value)"></div>';
+  document.getElementById('resultStats').insertAdjacentHTML('afterend', searchWrap);
 
   var totalPayout = 0, totalPool = 0, totalBills = 0, flagCount = allFlags.length;
   var hospitalShortfall = 0, totalTds = 0, totalNet = 0;
@@ -1605,7 +1671,8 @@ function buildBillTable(billResults, docIdx) {
       '<td>' + br.baseMethod + (br.pkgOverride ? ' <span class="flag-badge" style="background:#ebf4ff;color:#2b6cb0">PKG</span>' : '') + '</td>' +
       '<td>' + br.splitPct + '%' + (br.selfRef ? '(S)' : '') + '</td>' +
       '<td style="text-align:right;font-weight:600">' + earningDisplay + '</td>' +
-      '<td><button class="btn btn-outline btn-sm" style="padding:2px 6px;font-size:11px" onclick="editBillEarning(' + docIdx + ',' + bIdx + ')" title="Override earning">\\u270E</button></td>' +
+      '<td><button class="btn btn-outline btn-sm" style="padding:2px 6px;font-size:11px" onclick="editBillEarning(' + docIdx + ',' + bIdx + ')" title="Override earning">\\u270E</button>' +
+      '<button class="btn btn-outline btn-sm" style="padding:2px 6px;font-size:11px;margin-left:2px" onclick="showBillDetail(' + docIdx + ',' + bIdx + ')" title="Calculation detail">?</button></td>' +
       '</tr>';
     if (br.overrideReason) h += '<tr' + (isExcluded ? ' style="opacity:0.4"' : '') + '><td colspan="10" style="font-size:11px;color:#6b46c1;padding:2px 8px">Override: ' + br.overrideReason + '</td></tr>';
     if (br.flagged && !isExcluded) h += '<tr style="background:#fff5f5"><td colspan="10" style="color:#c53030;font-size:12px">\\u26A0 ' + br.flagReason + '</td></tr>';
@@ -1720,6 +1787,49 @@ function exportResultsCSV() {
   a.href = URL.createObjectURL(blob);
   a.download = 'medpay_' + document.getElementById('calc_month').value + '.csv';
   a.click();
+}
+
+// ============ SEARCH FILTER ============
+function filterResultCards(query) {
+  var q = query.toLowerCase();
+  document.querySelectorAll('.result-card').forEach(function(card) {
+    var text = card.textContent.toLowerCase();
+    card.style.display = (!q || text.indexOf(q) >= 0) ? '' : 'none';
+  });
+}
+
+// ============ BILL CALCULATION DETAIL ============
+function showBillDetail(docIdx, billIdx) {
+  var br = calcResults[docIdx].billResults[billIdx];
+  var contract = calcResults[docIdx].contract;
+  var b = br.bill;
+  var steps = [];
+  steps.push('Bill: ' + b.billNo + ' | Patient: ' + b.patientName);
+  steps.push('Sponsor: ' + (b.sponsor || 'CASH/blank') + ' \\u2192 Payor: ' + br.payor);
+  steps.push('IP/OP: ' + b.ipOp + ' | Self-ref: ' + (br.selfRef ? 'Yes' : 'No'));
+  if (br.pkgOverride) {
+    steps.push('\\u2714 Procedure package matched: "' + br.pkgName + '" \\u2192 Fixed fee: Rs. ' + Math.round(br.earning));
+  } else if (br.baseMethod.indexOf('OPD') === 0) {
+    var docAmt = b.rows.reduce(function(s, r) { return s + r.doctorAmt; }, 0);
+    steps.push('OPD: Doctor Amt sum = Rs. ' + Math.round(docAmt));
+    steps.push('OPD %: ' + br.splitPct + '% \\u2192 Earning = Rs. ' + Math.round(br.earning));
+  } else {
+    steps.push('Base method: ' + br.baseMethod);
+    if (br.baseMethod === 'A') {
+      var docAmt = b.rows.reduce(function(s, r) { return s + r.doctorAmt; }, 0);
+      steps.push('Sum of Doctor Amt across ' + b.rows.length + ' rows = Rs. ' + Math.round(docAmt));
+    } else if (br.baseMethod === 'B' || br.baseMethod === 'B_pct') {
+      steps.push('Net Amt - (Rad+Path+Pharma+Lab) = Rs. ' + Math.round(br.baseAmount));
+    } else if (br.baseMethod === 'C') {
+      steps.push('IP PACKAGE Service Amt = Rs. ' + Math.round(br.baseAmount));
+    }
+    steps.push('Base amount: Rs. ' + Math.round(br.baseAmount));
+    steps.push('Split: ' + br.splitPct + '% (' + (br.selfRef ? 'self-ref' : 'other-ref') + ')');
+    steps.push('Earning: Rs. ' + Math.round(br.baseAmount) + ' \\u00D7 ' + br.splitPct + '% = Rs. ' + Math.round(br.earning));
+  }
+  if (br.originalEarning != null) steps.push('\\u270E Override: Rs. ' + Math.round(br.originalEarning) + ' \\u2192 Rs. ' + Math.round(br.earning) + ' (' + br.overrideReason + ')');
+  if (br.excluded) steps.push('\\u2718 EXCLUDED: ' + br.overrideReason);
+  alert(steps.join('\\n'));
 }
 
 // ============ BILL & SETTLEMENT OVERRIDES ============
@@ -1868,6 +1978,24 @@ async function saveSettlements() {
     centres.forEach(function(c) { if (centresSummary.indexOf(c) < 0) centresSummary.push(c); });
   });
 
+  // Check for existing settlements (duplicate detection)
+  try {
+    var checkUrl = '/api/settlements/check?month=' + month + '&centres=' + centresSummary.join(',') + '&doctor_ids=' + calcResults.map(function(r) { return r.docId; }).join(',');
+    var checkResp = await fetch(checkUrl);
+    if (checkResp.ok) {
+      var existing = await checkResp.json();
+      if (existing.length > 0) {
+        var existNames = existing.map(function(e) { return e.doctor_name; }).join(', ');
+        var action = confirm('Existing settlements found for ' + existing.length + ' doctor(s): ' + existNames + '\\n\\nClick OK to REPLACE them, or Cancel to abort.');
+        if (!action) return;
+        // Delete existing before saving
+        for (var i = 0; i < existing.length; i++) {
+          await fetch('/api/settlements/' + existing[i].id, { method: 'DELETE' });
+        }
+      }
+    }
+  } catch(e) { /* proceed anyway if check fails */ }
+
   if (!confirm('Save ' + calcResults.length + ' settlement(s) for ' + month + ' across ' + centresSummary.join(', ') + '?')) return;
 
   var payload = calcResults.map(function(r) {
@@ -1955,28 +2083,43 @@ async function settlementsPage(env, searchParams) {
   let pmtDataMap = {};
   for (const s of settlements) {
     const hasPmt = !!s.payment_utr;
-    const pmtBadge = hasPmt ? `<span class="badge badge-active">Paid</span>` : (s.locked ? `<span class="badge" style="background:#fefcbf;color:#975a16">Awaiting Payment</span>` : '');
+    const st = s.status || (hasPmt ? 'paid' : (s.locked ? 'locked' : 'draft'));
+    const statusBadges = {
+      draft: '<span class="badge badge-inactive">Draft</span>',
+      locked: '<span class="badge" style="background:#ebf4ff;color:#2b6cb0">Locked</span>',
+      approved: '<span class="badge" style="background:#fefcbf;color:#975a16">Approved</span>',
+      paid: '<span class="badge badge-active">Paid</span>'
+    };
     const grossP = s.final_payout || 0;
     const tdsAmt = s.tds_amount || (grossP * 0.1);
     const netP = s.net_payout || (grossP - tdsAmt);
     pmtDataMap[s.id] = { utr: s.payment_utr||'', date: s.payment_date||'', bank: s.payment_bank||'', mode: s.payment_mode||'NEFT', amount: s.payment_amount || netP, gross: grossP, tdsAmt: tdsAmt };
+
+    // Build action buttons based on status
+    let actions = '<button class="btn btn-outline btn-sm" onclick="viewBills(' + s.id + ')">Bills</button>';
+    if (st === 'draft') {
+      actions += '<button class="btn btn-success btn-sm" onclick="lockSettlement(' + s.id + ')">Lock</button>';
+      actions += '<button class="btn btn-danger btn-sm" onclick="deleteSettlement(' + s.id + ')">Delete</button>';
+    } else if (st === 'locked') {
+      actions += '<button class="btn btn-sm" style="background:#fefcbf;color:#975a16" onclick="approveSettlement(' + s.id + ')">Approve</button>';
+      actions += '<button class="btn btn-outline btn-sm" onclick="unlockSettlement(' + s.id + ')">Unlock</button>';
+    } else if (st === 'approved') {
+      actions += `<button class="btn btn-sm" style="background:#ebf4ff;color:#2b6cb0" onclick="showPaymentModal(${s.id})">Record Payment</button>`;
+      actions += '<button class="btn btn-outline btn-sm" onclick="unlockSettlement(' + s.id + ')">Revert</button>';
+    } else if (st === 'paid') {
+      actions += '<a href="/statement/' + s.id + '" target="_blank" class="btn btn-success btn-sm">Statement</a>';
+      actions += `<button class="btn btn-sm" style="background:#ebf4ff;color:#2b6cb0" onclick="showPaymentModal(${s.id})">Edit Payment</button>`;
+    }
+
     rows += `<tr>
       <td>${s.month}</td>
       <td>${s.centre}</td>
       <td style="font-weight:600">${s.display_name || s.doctor_name}</td>
       <td>${fmtRs(s.calculated_pool)}</td>
-      <td style="font-weight:700;color:#276749">${fmtRs(s.final_payout)}</td>
+      <td style="font-weight:700;color:#276749">${fmtRs(netP)}</td>
       <td>${s.mgm_triggered ? '<span class="trigger-badge trigger-mgm">MGM</span>' : ''}${s.incentive_triggered ? '<span class="trigger-badge trigger-incentive">Incentive</span>' : ''}</td>
-      <td><span class="badge ${s.locked ? 'badge-active' : 'badge-inactive'}">${s.locked ? 'Locked' : 'Draft'}</span> ${pmtBadge}</td>
-      <td>
-        <div class="btn-group">
-          <button class="btn btn-outline btn-sm" onclick="viewBills(${s.id})">Bills</button>
-          ${s.locked ? `<button class="btn btn-sm" style="background:#ebf4ff;color:#2b6cb0" onclick="showPaymentModal(${s.id})">Payment</button>` : ''}
-          ${s.locked && hasPmt ? '<a href="/statement/' + s.id + '" target="_blank" class="btn btn-success btn-sm">Statement</a>' : ''}
-          ${!s.locked ? '<button class="btn btn-success btn-sm" onclick="lockSettlement(' + s.id + ')">Lock</button>' : '<button class="btn btn-outline btn-sm" onclick="unlockSettlement(' + s.id + ')">Unlock</button>'}
-          ${!s.locked ? '<button class="btn btn-danger btn-sm" onclick="deleteSettlement(' + s.id + ')">Delete</button>' : ''}
-        </div>
-      </td>
+      <td>${statusBadges[st] || statusBadges.draft}${s.approved_by ? '<div style="font-size:10px;color:#718096">by ' + s.approved_by + '</div>' : ''}</td>
+      <td><div class="btn-group">${actions}</div></td>
     </tr>`;
   }
   const pmtDataJson = JSON.stringify(pmtDataMap);
@@ -2063,6 +2206,13 @@ async function lockSettlement(id) {
 async function unlockSettlement(id) {
   if (!confirm('Unlock this settlement?')) return;
   var r = await fetch('/api/settlements/' + id + '/unlock', { method: 'PUT' });
+  if (r.ok) location.reload();
+  else alert('Error: ' + (await r.text()));
+}
+
+async function approveSettlement(id) {
+  if (!confirm('Approve this settlement for payment?')) return;
+  var r = await fetch('/api/settlements/' + id + '/approve', { method: 'PUT' });
   if (r.ok) location.reload();
   else alert('Error: ' + (await r.text()));
 }
@@ -2412,9 +2562,18 @@ async function deleteAlias(id) {
 }
 
 // ===================== API HANDLERS =====================
-async function handleApi(request, env, path) {
+async function handleApi(request, env, path, auth) {
   const method = request.method;
   const json = method === 'POST' || method === 'PUT' ? await request.json().catch(() => null) : null;
+
+  // Role-based protection: doctors can only read their own statement data
+  const adminOnly = ['POST', 'PUT', 'DELETE'];
+  const doctorAllowedPaths = ['/api/statement/'];
+  if (auth.role === 'doctor') {
+    if (adminOnly.indexOf(method) >= 0) return new Response('Admin access required', { status: 403 });
+    const isDoctorPath = doctorAllowedPaths.some(p => path.startsWith(p));
+    if (!isDoctorPath && path !== '/api/doctors') return new Response('Access denied', { status: 403 });
+  }
 
   // ---- DOCTORS ----
   if (path === '/api/doctors' && method === 'GET') {
@@ -2465,6 +2624,7 @@ async function handleApi(request, env, path) {
       const normName = d.name.toLowerCase().replace(/\./g, '').replace(/\s+/g, ' ').trim();
       await env.DB.prepare('INSERT OR IGNORE INTO doctor_aliases (alias, doctor_id) VALUES (?, ?)').bind(normName, doctorId).run();
 
+      await auditLog(env, auth, 'doctor_create', 'doctors', doctorId, 'Created ' + d.name + ' (' + c.contract_type + ')');
       return Response.json({ id: doctorId, success: true });
     } catch (e) {
       return new Response('Error: ' + e.message, { status: 500 });
@@ -2557,6 +2717,17 @@ async function handleApi(request, env, path) {
   }
 
   // ---- SETTLEMENTS ----
+  // GET /api/settlements/check — duplicate detection
+  if (path === '/api/settlements/check' && method === 'GET') {
+    const sp = new URL(request.url).searchParams;
+    const month = sp.get('month');
+    const doctorIds = (sp.get('doctor_ids') || '').split(',').filter(Boolean).map(Number);
+    if (!month || doctorIds.length === 0) return Response.json([]);
+    const placeholders = doctorIds.map(() => '?').join(',');
+    const existing = (await env.DB.prepare(`SELECT ms.id, ms.doctor_id, ms.centre, ms.status, d.name as doctor_name FROM monthly_settlements ms JOIN doctors d ON d.id = ms.doctor_id WHERE ms.month = ? AND ms.doctor_id IN (${placeholders})`).bind(month, ...doctorIds).all()).results || [];
+    return Response.json(existing);
+  }
+
   if (path === '/api/settlements' && method === 'POST') {
     if (!json || !Array.isArray(json)) return new Response('Expected array', { status: 400 });
     try {
@@ -2572,6 +2743,7 @@ async function handleApi(request, env, path) {
           ).run();
         }
       }
+      await auditLog(env, auth, 'settlement_save', 'settlements', null, json.length + ' settlement(s) saved');
       return Response.json({ success: true, count: json.length });
     } catch (e) {
       return new Response('Error: ' + e.message, { status: 500 });
@@ -2588,14 +2760,18 @@ async function handleApi(request, env, path) {
   // PUT /api/settlements/:id/lock
   const lockMatch = path.match(/^\/api\/settlements\/(\d+)\/lock$/);
   if (lockMatch && method === 'PUT') {
-    await env.DB.prepare('UPDATE monthly_settlements SET locked = 1 WHERE id = ?').bind(parseInt(lockMatch[1])).run();
+    const lid = parseInt(lockMatch[1]);
+    await env.DB.prepare('UPDATE monthly_settlements SET locked = 1, status = ? WHERE id = ?').bind('locked', lid).run();
+    await auditLog(env, auth, 'settlement_lock', 'settlements', lid, 'Locked');
     return Response.json({ success: true });
   }
 
   // PUT /api/settlements/:id/unlock
   const unlockMatch = path.match(/^\/api\/settlements\/(\d+)\/unlock$/);
   if (unlockMatch && method === 'PUT') {
-    await env.DB.prepare('UPDATE monthly_settlements SET locked = 0 WHERE id = ?').bind(parseInt(unlockMatch[1])).run();
+    const uid = parseInt(unlockMatch[1]);
+    await env.DB.prepare('UPDATE monthly_settlements SET locked = 0, status = ? WHERE id = ?').bind('draft', uid).run();
+    await auditLog(env, auth, 'settlement_unlock', 'settlements', uid, 'Unlocked');
     return Response.json({ success: true });
   }
 
@@ -2605,6 +2781,7 @@ async function handleApi(request, env, path) {
     const sid = parseInt(delSettMatch[1]);
     await env.DB.prepare('DELETE FROM bill_calculations WHERE settlement_id = ?').bind(sid).run();
     await env.DB.prepare('DELETE FROM monthly_settlements WHERE id = ?').bind(sid).run();
+    await auditLog(env, auth, 'settlement_delete', 'settlements', sid, 'Deleted');
     return Response.json({ success: true });
   }
 
@@ -2613,9 +2790,19 @@ async function handleApi(request, env, path) {
   if (pmtMatch && method === 'PUT') {
     if (!json) return new Response('No data', { status: 400 });
     const sid = parseInt(pmtMatch[1]);
-    await env.DB.prepare('UPDATE monthly_settlements SET payment_utr = ?, payment_date = ?, payment_bank = ?, payment_mode = ?, payment_amount = ? WHERE id = ?').bind(
-      json.payment_utr, json.payment_date, json.payment_bank, json.payment_mode, json.payment_amount, sid
+    await env.DB.prepare('UPDATE monthly_settlements SET payment_utr = ?, payment_date = ?, payment_bank = ?, payment_mode = ?, payment_amount = ?, status = ? WHERE id = ?').bind(
+      json.payment_utr, json.payment_date, json.payment_bank, json.payment_mode, json.payment_amount, 'paid', sid
     ).run();
+    await auditLog(env, auth, 'payment_record', 'settlements', sid, 'UTR: ' + json.payment_utr + ', Rs. ' + json.payment_amount);
+    return Response.json({ success: true });
+  }
+
+  // PUT /api/settlements/:id/approve
+  const approveMatch = path.match(/^\/api\/settlements\/(\d+)\/approve$/);
+  if (approveMatch && method === 'PUT') {
+    const aid = parseInt(approveMatch[1]);
+    await env.DB.prepare('UPDATE monthly_settlements SET status = ?, approved_by = ?, approved_at = ? WHERE id = ?').bind('approved', auth.doctorName || 'Admin', new Date().toISOString(), aid).run();
+    await auditLog(env, auth, 'settlement_approve', 'settlements', aid, 'Approved');
     return Response.json({ success: true });
   }
 
@@ -3151,14 +3338,21 @@ export default {
 
     // Login
     if (path === '/login' && request.method === 'POST') {
+      const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+      const allowed = await checkRateLimit(env, ip);
+      if (!allowed) {
+        return new Response(pinPage('Too many attempts. Please wait 60 seconds.'), { headers: { 'Content-Type': 'text/html' } });
+      }
+      await recordLoginAttempt(env, ip);
       const form = await request.formData();
       const pin = form.get('pin');
       const auth = await validatePin(pin, env);
       if (auth.valid) {
+        await auditLog(env, auth, 'login', 'session', null, 'Login from ' + ip);
         return new Response(null, {
           status: 302,
           headers: {
-            'Location': '/',
+            'Location': auth.role === 'doctor' ? '/portal' : '/',
             'Set-Cookie': `medpay_pin=${pin}; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400`
           }
         });
@@ -3191,7 +3385,7 @@ export default {
 
     // API routes
     if (path.startsWith('/api/')) {
-      return handleApi(request, env, path);
+      return handleApi(request, env, path, auth);
     }
 
     // Doctor portal — non-admin doctors can only access /portal and /statement
