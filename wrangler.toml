@@ -1,0 +1,8 @@
+name = "medpay"
+main = "src/index.js"
+compatibility_date = "2024-01-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "medpay-db"
+database_id = "eef2fd83-1a4e-4d8e-b0a4-51e9be88bc7d"

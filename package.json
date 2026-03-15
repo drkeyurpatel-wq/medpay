@@ -1,0 +1,13 @@
+{
+  "name": "medpay",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "deploy": "npx wrangler deploy",
+    "dev": "npx wrangler dev",
+    "check": "node --check src/index.js"
+  },
+  "devDependencies": {
+    "wrangler": "^3.0.0"
+  }
+}
