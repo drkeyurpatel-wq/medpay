@@ -54,6 +54,11 @@ const CSS = `
   .stat-card .sub { font-size: 13px; color: #a0aec0; margin-top: 2px; }
   table { width: 100%; border-collapse: collapse; font-size: 14px; }
   th { background: #f7fafc; color: #4a5568; font-weight: 600; text-align: left; padding: 10px 12px; border-bottom: 2px solid #e2e8f0; }
+  th.sortable { cursor: pointer; user-select: none; position: relative; padding-right: 20px; }
+  th.sortable:hover { background: #edf2f7; }
+  th.sortable::after { content: '\\2195'; position: absolute; right: 6px; color: #cbd5e0; font-size: 12px; }
+  th.sortable.asc::after { content: '\\2191'; color: #2b6cb0; }
+  th.sortable.desc::after { content: '\\2193'; color: #2b6cb0; }
   td { padding: 10px 12px; border-bottom: 1px solid #f0f0f0; }
   tr:hover { background: #f7fafc; }
   .toast { position: fixed; top: 20px; right: 20px; padding: 12px 24px; border-radius: 8px; color: #fff; font-weight: 600; z-index: 1000; animation: slideIn 0.3s ease; }
@@ -129,6 +134,30 @@ function htmlShell(title, navActive, bodyContent, scriptContent = '') {
     ${bodyContent}
   </div>
   ${scriptContent}
+  <script>
+  document.addEventListener('click', function(e) {
+    var th = e.target.closest('th.sortable');
+    if (!th) return;
+    var table = th.closest('table');
+    var tbody = table.querySelector('tbody');
+    if (!tbody) return;
+    var idx = Array.from(th.parentElement.children).indexOf(th);
+    var rows = Array.from(tbody.querySelectorAll('tr'));
+    var isAsc = th.classList.contains('asc');
+    th.parentElement.querySelectorAll('th').forEach(function(h) { h.classList.remove('asc', 'desc'); });
+    th.classList.add(isAsc ? 'desc' : 'asc');
+    var dir = isAsc ? -1 : 1;
+    rows.sort(function(a, b) {
+      var ca = (a.children[idx] || {}).textContent || '';
+      var cb = (b.children[idx] || {}).textContent || '';
+      var na = parseFloat(ca.replace(/[^0-9.-]/g, ''));
+      var nb = parseFloat(cb.replace(/[^0-9.-]/g, ''));
+      if (!isNaN(na) && !isNaN(nb)) return (na - nb) * dir;
+      return ca.localeCompare(cb) * dir;
+    });
+    rows.forEach(function(r) { tbody.appendChild(r); });
+  });
+  </script>
 </body>
 </html>`;
 }
@@ -278,7 +307,7 @@ async function dashboardPage(env) {
     <div class="card">
       <div class="card-header"><div class="card-title">Recent Settlements</div></div>
       <table>
-        <thead><tr><th>Month</th><th>Centre</th><th>Doctor</th><th>Pool</th><th>Payout</th><th>Status</th></tr></thead>
+        <thead><tr><th class="sortable">Month</th><th class="sortable">Centre</th><th class="sortable">Doctor</th><th class="sortable">Pool</th><th class="sortable">Payout</th><th>Status</th></tr></thead>
         <tbody>
           ${monthSettlements.length === 0 ? '<tr><td colspan="6" style="text-align:center;color:#a0aec0;padding:24px;">No settlements yet. Go to Calculator to process billing data.</td></tr>' : ''}
           ${monthSettlements.map(s => {
@@ -323,7 +352,7 @@ async function doctorsListPage(env) {
     </div>
     <div class="card" style="padding:0;overflow-x:auto">
       <table>
-        <thead><tr><th>Display Name</th><th>Canonical Name</th><th>Contract</th><th>Aliases</th><th>Status</th><th>Actions</th></tr></thead>
+        <thead><tr><th class="sortable">Display Name</th><th class="sortable">Canonical Name</th><th class="sortable">Contract</th><th>Aliases</th><th class="sortable">Status</th><th>Actions</th></tr></thead>
         <tbody>${rows || '<tr><td colspan="6" style="text-align:center;padding:24px;color:#a0aec0">No doctors registered. Click + Add Doctor to start.</td></tr>'}</tbody>
       </table>
     </div>
@@ -2125,8 +2154,10 @@ async function settlementsPage(env, searchParams) {
   const pmtDataJson = JSON.stringify(pmtDataMap);
 
   const body = `
-    <h1>Settlements</h1>
-    <p class="subtitle">Monthly settlement records</p>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+      <div><h1>Settlements</h1><p class="subtitle" style="margin:0">Monthly settlement records — Draft → Lock → Approve → Pay</p></div>
+      <a href="/payments/import" class="btn btn-primary">Batch Payment Import</a>
+    </div>
     <div class="card">
       <div class="form-row" style="margin-bottom:16px">
         <div class="form-group"><label>Month</label><input type="month" id="filter_month" value="${month}" onchange="applyFilter()"></div>
@@ -2144,7 +2175,7 @@ async function settlementsPage(env, searchParams) {
     </div>
     <div class="card" style="padding:0;overflow-x:auto">
       <table>
-        <thead><tr><th>Month</th><th>Centre</th><th>Doctor</th><th>Pool</th><th>Payout</th><th>Triggers</th><th>Status</th><th>Actions</th></tr></thead>
+        <thead><tr><th class="sortable">Month</th><th class="sortable">Centre</th><th class="sortable">Doctor</th><th class="sortable">Pool</th><th class="sortable">Payout</th><th>Triggers</th><th class="sortable">Status</th><th>Actions</th></tr></thead>
         <tbody>${rows || '<tr><td colspan="8" style="text-align:center;padding:24px;color:#a0aec0">No settlements found.</td></tr>'}</tbody>
       </table>
     </div>
@@ -2438,7 +2469,6 @@ async function executeImport() {
 async function monthEndPage(env) {
   const centres = ['Shilaj', 'Vastral', 'Modasa', 'Gandhinagar', 'Udaipur'];
   const now = new Date();
-  const currentMonth = now.toISOString().slice(0, 7);
 
   // Get last 3 months
   const months = [];
@@ -2447,9 +2477,55 @@ async function monthEndPage(env) {
     months.push(d.toISOString().slice(0, 7));
   }
 
-  // Query all settlements for these months
-  const allSettlements = (await env.DB.prepare('SELECT ms.*, d.name as doctor_name FROM monthly_settlements ms JOIN doctors d ON d.id = ms.doctor_id WHERE ms.month IN (?, ?, ?) ORDER BY ms.month DESC').bind(months[0], months[1], months[2]).all()).results || [];
+  const allSettlements = (await env.DB.prepare('SELECT ms.*, d.name as doctor_name, d.display_name FROM monthly_settlements ms JOIN doctors d ON d.id = ms.doctor_id WHERE ms.month IN (?, ?, ?) ORDER BY ms.month DESC').bind(months[0], months[1], months[2]).all()).results || [];
   const totalDoctors = (await env.DB.prepare('SELECT COUNT(*) as cnt FROM doctors WHERE active = 1').first()).cnt || 0;
+
+  // MoM comparison: current vs previous month per doctor
+  let momAlerts = '';
+  if (months.length >= 2) {
+    const currMonth = months[0];
+    const prevMonth = months[1];
+    const currByDoc = {};
+    const prevByDoc = {};
+    allSettlements.forEach(s => {
+      if (s.month === currMonth) currByDoc[s.doctor_id] = { pool: s.calculated_pool || 0, name: s.display_name || s.doctor_name, centre: s.centre };
+      if (s.month === prevMonth) prevByDoc[s.doctor_id] = { pool: s.calculated_pool || 0, name: s.display_name || s.doctor_name, centre: s.centre };
+    });
+
+    let alerts = [];
+    for (const docId of Object.keys(currByDoc)) {
+      const curr = currByDoc[docId];
+      const prev = prevByDoc[docId];
+      if (!prev || prev.pool === 0) continue;
+      const change = ((curr.pool - prev.pool) / prev.pool) * 100;
+      if (Math.abs(change) >= 30) {
+        alerts.push({ name: curr.name, centre: curr.centre, currPool: curr.pool, prevPool: prev.pool, changePct: change });
+      }
+    }
+    // Doctors in prev but not curr
+    for (const docId of Object.keys(prevByDoc)) {
+      if (!currByDoc[docId]) {
+        const prev = prevByDoc[docId];
+        alerts.push({ name: prev.name, centre: prev.centre, currPool: 0, prevPool: prev.pool, changePct: -100, missing: true });
+      }
+    }
+
+    if (alerts.length > 0) {
+      alerts.sort((a, b) => a.changePct - b.changePct);
+      momAlerts = `<div class="card flag-card" style="margin-bottom:24px">
+        <div class="card-header"><div class="card-title" style="color:#c53030">MoM Anomaly Alerts (${alerts.length})</div></div>
+        <p style="font-size:13px;color:#718096;margin-bottom:12px">Doctors with &gt;30% pool change between ${prevMonth} and ${currMonth}</p>
+        <table style="font-size:13px">
+          <thead><tr><th>Doctor</th><th>Centre</th><th style="text-align:right">${prevMonth}</th><th style="text-align:right">${currMonth}</th><th style="text-align:right">Change</th><th>Flag</th></tr></thead>
+          <tbody>${alerts.map(a => {
+            const color = a.changePct < 0 ? '#c53030' : '#276749';
+            const flag = a.missing ? 'No data this month' : (a.changePct < -50 ? 'Major drop — check data' : (a.changePct < 0 ? 'Significant decline' : 'Significant spike'));
+            return `<tr><td style="font-weight:600">${a.name}</td><td>${a.centre}</td><td style="text-align:right">${fmtRs(a.prevPool)}</td><td style="text-align:right">${fmtRs(a.currPool)}</td><td style="text-align:right;font-weight:600;color:${color}">${a.changePct > 0 ? '+' : ''}${a.changePct.toFixed(0)}%</td><td><span class="flag-badge">${flag}</span></td></tr>`;
+          }).join('')}</tbody>
+        </table>
+      </div>`;
+    }
+  }
 
   let gridHtml = '';
   for (const month of months) {
@@ -2460,17 +2536,20 @@ async function monthEndPage(env) {
     let centreCards = '';
     for (const centre of centres) {
       const cs = allSettlements.filter(s => s.month === month && s.centre === centre);
-      const drafted = cs.filter(s => !s.locked).length;
-      const locked = cs.filter(s => s.locked && !s.payment_utr).length;
-      const paid = cs.filter(s => !!s.payment_utr).length;
+      const getStatus = function(x) { return x.status || (x.payment_utr ? 'paid' : (x.locked ? 'locked' : 'draft')); };
+      const drafted = cs.filter(s => getStatus(s) === 'draft').length;
+      const locked = cs.filter(s => getStatus(s) === 'locked').length;
+      const approved = cs.filter(s => getStatus(s) === 'approved').length;
+      const paid = cs.filter(s => getStatus(s) === 'paid' || !!s.payment_utr).length;
       const totalPayout = cs.reduce((sum, s) => sum + (s.final_payout || 0), 0);
       const totalNet = cs.reduce((sum, s) => sum + (s.net_payout || s.final_payout * 0.9 || 0), 0);
       const total = cs.length;
 
       let statusColor = '#e2e8f0';
       if (total > 0 && paid === total) statusColor = '#48bb78';
-      else if (locked > 0 || paid > 0) statusColor = '#ed8936';
-      else if (drafted > 0) statusColor = '#4299e1';
+      else if (approved > 0 || paid > 0) statusColor = '#ed8936';
+      else if (locked > 0) statusColor = '#4299e1';
+      else if (drafted > 0) statusColor = '#a0aec0';
 
       centreCards += `<div class="card" style="padding:16px;border-top:3px solid ${statusColor}">
         <div style="font-weight:700;font-size:14px;color:#1a365d">${centre}</div>
@@ -2478,7 +2557,8 @@ async function monthEndPage(env) {
         <div style="font-size:12px;color:#718096">Gross: ${fmtRs(totalPayout)}</div>
         <div style="margin-top:8px;display:flex;gap:4px;flex-wrap:wrap">
           ${drafted > 0 ? `<span class="badge badge-inactive">${drafted} Draft</span>` : ''}
-          ${locked > 0 ? `<span class="badge" style="background:#fefcbf;color:#975a16">${locked} Locked</span>` : ''}
+          ${locked > 0 ? `<span class="badge" style="background:#ebf4ff;color:#2b6cb0">${locked} Locked</span>` : ''}
+          ${approved > 0 ? `<span class="badge" style="background:#fefcbf;color:#975a16">${approved} Approved</span>` : ''}
           ${paid > 0 ? `<span class="badge badge-active">${paid} Paid</span>` : ''}
           ${total === 0 ? `<span class="badge" style="background:#f0f0f0;color:#a0aec0">No data</span>` : ''}
         </div>
@@ -2504,9 +2584,10 @@ async function monthEndPage(env) {
   const body = `
     <h1>Month-End Dashboard</h1>
     <p class="subtitle">Settlement status across all centres</p>
+    ${momAlerts}
     ${gridHtml}
   `;
-  return htmlShell('Month-End', 'dash', body);
+  return htmlShell('Month-End', 'monthend', body);
 }
 
 // ===================== PAGE: Aliases =====================
@@ -2964,6 +3045,192 @@ async function deleteAdj(id) {
 </script>`;
 
   return htmlShell('Adjustments', 'settlements', body, script);
+}
+
+// ===================== PAGE: Batch Payment Import =====================
+async function batchPaymentPage(env) {
+  // Get all approved/locked settlements without payment
+  const pending = (await env.DB.prepare("SELECT ms.*, d.name as doctor_name, d.display_name FROM monthly_settlements ms JOIN doctors d ON d.id = ms.doctor_id WHERE ms.payment_utr IS NULL AND (ms.status = 'approved' OR ms.locked = 1) ORDER BY ms.month DESC, d.name").all()).results || [];
+
+  let pendingRows = '';
+  for (const s of pending) {
+    const tds = s.tds_amount || (s.final_payout * 0.1);
+    const net = s.net_payout || (s.final_payout - tds);
+    pendingRows += `<tr><td>${s.id}</td><td>${s.month}</td><td>${s.centre}</td><td style="font-weight:600">${s.display_name || s.doctor_name}</td><td>${fmtRs(s.final_payout)}</td><td>${fmtRs(tds)}</td><td style="font-weight:700;color:#276749">${fmtRs(net)}</td></tr>`;
+  }
+
+  const body = `
+    <h1>Batch Payment Import</h1>
+    <p class="subtitle">Upload bank statement CSV to auto-match payments with settlements</p>
+
+    <div class="card">
+      <h3>Pending Payments (${pending.length})</h3>
+      <div style="overflow-x:auto;max-height:300px;overflow-y:auto">
+        <table style="font-size:13px">
+          <thead><tr><th>ID</th><th>Month</th><th>Centre</th><th>Doctor</th><th>Gross</th><th>TDS</th><th>Net Payable</th></tr></thead>
+          <tbody>${pendingRows || '<tr><td colspan="7" style="text-align:center;padding:16px;color:#a0aec0">No pending payments</td></tr>'}</tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Upload Bank Statement CSV</h3>
+      <p style="font-size:13px;color:#718096;margin-bottom:12px">CSV should have columns: <strong>Date, Description/Narration, Amount, UTR/Reference</strong>. System will match by net amount to pending settlements.</p>
+      <div class="upload-zone" onclick="document.getElementById('bankFile').click()" style="margin-bottom:16px">
+        <input type="file" id="bankFile" accept=".csv" style="display:none" onchange="handleBankCSV(this.files[0])">
+        <div style="font-size:36px;margin-bottom:8px">🏦</div>
+        <div style="font-size:16px;font-weight:600;color:#2d3748">Drop bank CSV here or click to browse</div>
+      </div>
+      <div id="bankPreview" class="hidden"></div>
+    </div>
+
+    <div id="matchResults" class="hidden">
+      <div class="card">
+        <h3>Matched Payments</h3>
+        <div id="matchTable"></div>
+        <div style="margin-top:16px;text-align:right">
+          <button class="btn btn-primary" onclick="applyMatchedPayments()">Apply All Matched Payments</button>
+        </div>
+      </div>
+    </div>
+  `;
+
+  const pendingJson = JSON.stringify(pending.map(s => ({
+    id: s.id, month: s.month, centre: s.centre,
+    doctor: s.display_name || s.doctor_name,
+    gross: s.final_payout,
+    tds: s.tds_amount || (s.final_payout * 0.1),
+    net: s.net_payout || (s.final_payout - (s.tds_amount || s.final_payout * 0.1))
+  })));
+
+  const script = `<script>
+var PENDING = ${pendingJson};
+var bankRows = [];
+var matches = [];
+
+function handleBankCSV(file) {
+  if (!file) return;
+  var reader = new FileReader();
+  reader.onload = function(e) {
+    var lines = e.target.result.split('\\n');
+    if (lines.length < 2) { alert('Empty CSV'); return; }
+    var headers = lines[0].split(',').map(function(h) { return h.trim().replace(/"/g, '').toLowerCase(); });
+
+    // Find relevant columns
+    var dateCol = headers.findIndex(function(h) { return h.indexOf('date') >= 0; });
+    var descCol = headers.findIndex(function(h) { return h.indexOf('desc') >= 0 || h.indexOf('narr') >= 0 || h.indexOf('particular') >= 0; });
+    var amtCol = headers.findIndex(function(h) { return h.indexOf('amount') >= 0 || h.indexOf('credit') >= 0 || h.indexOf('debit') >= 0; });
+    var utrCol = headers.findIndex(function(h) { return h.indexOf('utr') >= 0 || h.indexOf('ref') >= 0 || h.indexOf('cheque') >= 0 || h.indexOf('transaction') >= 0; });
+
+    bankRows = [];
+    for (var i = 1; i < lines.length; i++) {
+      if (!lines[i].trim()) continue;
+      var cells = lines[i].split(',').map(function(c) { return c.trim().replace(/^"|"$/g, ''); });
+      var amt = parseFloat((cells[amtCol] || '0').replace(/,/g, ''));
+      if (!amt || amt <= 0) continue;
+      bankRows.push({
+        date: cells[dateCol] || '',
+        desc: cells[descCol] || '',
+        amount: amt,
+        utr: cells[utrCol] || ''
+      });
+    }
+
+    document.getElementById('bankPreview').classList.remove('hidden');
+    document.getElementById('bankPreview').innerHTML = '<p><strong>' + bankRows.length + '</strong> credit transactions found. Matching against ' + PENDING.length + ' pending settlements...</p>';
+
+    matchPayments();
+  };
+  reader.readAsText(file);
+}
+
+function matchPayments() {
+  matches = [];
+  var usedSettlements = {};
+  var usedBank = {};
+
+  // Pass 1: exact net amount match
+  bankRows.forEach(function(br, bi) {
+    if (usedBank[bi]) return;
+    PENDING.forEach(function(ps) {
+      if (usedSettlements[ps.id] || usedBank[bi]) return;
+      var net = Math.round(ps.net);
+      var bankAmt = Math.round(br.amount);
+      if (net === bankAmt) {
+        matches.push({ settlement: ps, bankRow: br, bankIdx: bi, confidence: 'exact' });
+        usedSettlements[ps.id] = true;
+        usedBank[bi] = true;
+      }
+    });
+  });
+
+  // Pass 2: close match (within 1%)
+  bankRows.forEach(function(br, bi) {
+    if (usedBank[bi]) return;
+    PENDING.forEach(function(ps) {
+      if (usedSettlements[ps.id] || usedBank[bi]) return;
+      var net = ps.net;
+      var diff = Math.abs(br.amount - net);
+      if (diff < net * 0.01 && diff < 500) {
+        matches.push({ settlement: ps, bankRow: br, bankIdx: bi, confidence: 'close' });
+        usedSettlements[ps.id] = true;
+        usedBank[bi] = true;
+      }
+    });
+  });
+
+  // Display matches
+  var html = '<table style="font-size:13px"><thead><tr><th>Doctor</th><th>Month</th><th>Expected Net</th><th>Bank Amount</th><th>UTR</th><th>Date</th><th>Match</th><th>Inc.</th></tr></thead><tbody>';
+  matches.forEach(function(m, i) {
+    var confColor = m.confidence === 'exact' ? '#276749' : '#ed8936';
+    html += '<tr><td style="font-weight:600">' + m.settlement.doctor + '</td><td>' + m.settlement.month + '</td><td>' + Math.round(m.settlement.net).toLocaleString('en-IN') + '</td><td>' + Math.round(m.bankRow.amount).toLocaleString('en-IN') + '</td><td>' + m.bankRow.utr + '</td><td>' + m.bankRow.date + '</td><td style="color:' + confColor + ';font-weight:600">' + m.confidence + '</td><td><input type="checkbox" class="match-chk" data-idx="' + i + '" checked></td></tr>';
+  });
+  html += '</tbody></table>';
+  if (matches.length === 0) html = '<p style="color:#a0aec0">No matches found. Check that bank CSV amounts match settlement net payouts.</p>';
+
+  var unmatched = PENDING.filter(function(ps) { return !usedSettlements[ps.id]; });
+  if (unmatched.length > 0) {
+    html += '<div style="margin-top:16px"><h3 style="color:#ed8936">Unmatched Settlements (' + unmatched.length + ')</h3><table style="font-size:12px"><thead><tr><th>Doctor</th><th>Month</th><th>Net</th></tr></thead><tbody>';
+    unmatched.forEach(function(ps) {
+      html += '<tr><td>' + ps.doctor + '</td><td>' + ps.month + '</td><td>' + Math.round(ps.net).toLocaleString('en-IN') + '</td></tr>';
+    });
+    html += '</tbody></table></div>';
+  }
+
+  document.getElementById('matchTable').innerHTML = html;
+  document.getElementById('matchResults').classList.remove('hidden');
+}
+
+async function applyMatchedPayments() {
+  var checkedMatches = [];
+  document.querySelectorAll('.match-chk:checked').forEach(function(cb) {
+    checkedMatches.push(matches[parseInt(cb.getAttribute('data-idx'))]);
+  });
+  if (checkedMatches.length === 0) { alert('No matches selected'); return; }
+  if (!confirm('Apply ' + checkedMatches.length + ' payment(s)?')) return;
+
+  var ok = 0, fail = 0;
+  for (var i = 0; i < checkedMatches.length; i++) {
+    var m = checkedMatches[i];
+    var payload = {
+      payment_utr: m.bankRow.utr || 'BANK-' + (i + 1),
+      payment_date: m.bankRow.date || new Date().toISOString().slice(0, 10),
+      payment_bank: '',
+      payment_mode: 'NEFT',
+      payment_amount: m.bankRow.amount
+    };
+    try {
+      var r = await fetch('/api/settlements/' + m.settlement.id + '/payment', { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+      if (r.ok) ok++;
+      else fail++;
+    } catch(e) { fail++; }
+  }
+  alert(ok + ' payment(s) applied' + (fail > 0 ? ', ' + fail + ' failed' : ''));
+  if (ok > 0) location.reload();
+}
+</script>`;
+
+  return htmlShell('Batch Payment', 'settlements', body, script);
 }
 
 // ===================== PAGE: Payout Statement =====================
@@ -3436,6 +3703,8 @@ export default {
         html = await monthEndPage(env);
       } else if (path === '/adjustments') {
         html = await adjustmentsPage(env, url.searchParams);
+      } else if (path === '/payments/import') {
+        html = await batchPaymentPage(env);
       } else if (path.match(/^\/statement\/(\d+)$/)) {
         const id = parseInt(path.match(/^\/statement\/(\d+)$/)[1]);
         html = await statementPage(env, id);
