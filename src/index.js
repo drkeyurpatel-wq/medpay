@@ -3032,9 +3032,48 @@ async function statementPage(env, settlementId) {
         </table>
       </div>
 
+      <!-- CLOSING MESSAGE -->
+      <div style="margin-top:24px;padding:16px 20px;background:#f7fafc;border-left:3px solid #2b6cb0;border-radius:0 8px 8px 0;font-size:13px;color:#2d3748;line-height:1.6">
+        ${(() => {
+          const poolRatio = pool / (contract ? contract.mgm_amount || 1 : 1);
+          const isHighPerformer = settlement.incentive_triggered;
+          const isMgmGap = settlement.mgm_triggered;
+          const gapPct = isMgmGap ? Math.round((1 - poolRatio) * 100) : 0;
+          const isNearThreshold = !isMgmGap && !isHighPerformer && contract && contract.threshold_amount && pool > contract.mgm_amount && pool >= contract.threshold_amount * 0.85;
+          const isFirstMonth = settlement.id <= 5; // rough proxy
+
+          if (isHighPerformer) {
+            const msgs = [
+              'Exceptional performance this month — your professional fee pool exceeded the incentive threshold. Thank you for your outstanding contribution to patient care at Health1. We look forward to continuing this momentum together.',
+              'Congratulations on surpassing the incentive threshold this month. Your clinical excellence and dedication directly impact the quality of care at Health1. We truly value our partnership.',
+              'An outstanding month — your earnings have crossed the incentive threshold, reflecting your exceptional clinical contributions. Health1 is proud to have you on the team. Thank you for making a difference.'
+            ];
+            return msgs[settlement.id % msgs.length];
+          } else if (isNearThreshold) {
+            return 'Your professional fee pool is tracking very close to the incentive threshold — a strong performance this month. A small push in the coming period could unlock the incentive slab. We appreciate your consistent clinical contributions to Health1.';
+          } else if (isMgmGap && gapPct > 40) {
+            return 'We appreciate your continued association with Health1. We understand that building a practice takes time, and we remain committed to supporting your growth. Please feel free to discuss any operational support, scheduling preferences, or referral opportunities with the management team — we are here to help you succeed.';
+          } else if (isMgmGap && gapPct > 15) {
+            return 'Thank you for your contributions this month. Your professional fee pool is developing, and Health1 is committed to supporting your practice growth. If there are ways we can help — whether through scheduling, referral coordination, or facility support — please do not hesitate to reach out to the management team.';
+          } else if (isMgmGap) {
+            return 'Thank you for your work this month. Your pool is nearly at the guaranteed minimum — continued momentum should see you comfortably past the MGM in the coming months. We value your partnership with Health1.';
+          } else {
+            const msgs = [
+              'Thank you for your clinical contributions to Health1 this month. We value our partnership and look forward to continued collaboration in delivering excellent patient care.',
+              'We appreciate your dedication to patient care at Health1. Your consistent contributions are valued by the entire team. Wishing you a productive month ahead.',
+              'Thank you for being an integral part of Health1. Your professional commitment makes a real difference in the lives of our patients. We look forward to another successful month together.'
+            ];
+            return msgs[settlement.id % msgs.length];
+          }
+        })()}
+      </div>
+
       <div class="signature-section">
-        <div class="sig-box"><div class="sig-line">For Health1 Super Speciality Hospitals</div></div>
-        <div class="sig-box"><div class="sig-line">${settlement.display_name || settlement.doctor_name}</div></div>
+        <div class="sig-box">
+          <div style="font-size:12px;color:#718096;margin-bottom:4px">Warm Regards,</div>
+          <div class="sig-line">For Health1 Super Speciality Hospitals<br><span style="font-size:11px;color:#4a5568">Dr. Keyur Patel, Chairman</span></div>
+        </div>
+        <div class="sig-box"><div class="sig-line">${settlement.display_name || settlement.doctor_name}<br><span style="font-size:11px;color:#4a5568">Acknowledged</span></div></div>
       </div>
 
       <div class="footer">
